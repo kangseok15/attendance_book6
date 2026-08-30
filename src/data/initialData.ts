@@ -1,0 +1,189 @@
+import { Student, DayConfig, AttendanceStatus, SessionType, SchoolEvent } from '../types/attendance';
+
+export const INITIAL_STUDENTS: Student[] = [
+  // 3학년 (15명)
+  { id: 's-3-1', seq: 1, grade: 3, classNum: 1, studentNum: 19, name: '최서윤', seatNum: '3-01', phone: '010-6651-6075', parentPhone: '010-7292-1160', academyDays: [], active: true },
+  { id: 's-3-2', seq: 2, grade: 3, classNum: 2, studentNum: 18, name: '최시온', seatNum: '3-02', phone: '010-8834-6879', parentPhone: '010-6487-6879', academyDays: [], active: true },
+  { id: 's-3-3', seq: 3, grade: 3, classNum: 3, studentNum: 1, name: '강지윤', seatNum: '3-03', phone: '010-4186-6325', parentPhone: '010-8788-6325', academyDays: [], active: true },
+  { id: 's-3-4', seq: 4, grade: 3, classNum: 4, studentNum: 11, name: '신예은', seatNum: '3-04', phone: '010-6617-1874', parentPhone: '010-8701-1874', academyDays: [], active: true },
+  { id: 's-3-5', seq: 5, grade: 3, classNum: 5, studentNum: 1, name: '강정인', seatNum: '3-05', phone: '010-4915-4450', parentPhone: '010-4919-4450', academyDays: [], active: true },
+  { id: 's-3-6', seq: 6, grade: 3, classNum: 5, studentNum: 8, name: '문채원', seatNum: '3-06', phone: '010-3454-6220', parentPhone: '010-2038-6220', academyDays: [], active: true },
+  { id: 's-3-7', seq: 7, grade: 3, classNum: 6, studentNum: 18, name: '조성희', seatNum: '3-07', phone: '010-4966-5415', parentPhone: '010-6254-5415', academyDays: [], active: true },
+  { id: 's-3-8', seq: 8, grade: 3, classNum: 6, studentNum: 20, name: '최은서', seatNum: '3-08', phone: '010-8315-8118', parentPhone: '010-4296-8118', academyDays: [], active: true },
+  { id: 's-3-9', seq: 9, grade: 3, classNum: 7, studentNum: 7, name: '김현서', seatNum: '3-09', phone: '010-2910-2129', parentPhone: '010-3385-2129', academyDays: [], active: true },
+  { id: 's-3-10', seq: 10, grade: 3, classNum: 7, studentNum: 9, name: '박주원', seatNum: '3-10', phone: '010-8545-8783', parentPhone: '010-5399-8783', academyDays: [], active: true },
+  { id: 's-3-11', seq: 11, grade: 3, classNum: 8, studentNum: 13, name: '오윤서', seatNum: '3-11', phone: '010-7255-6452', parentPhone: '010-2776-4964', academyDays: [], active: true },
+  { id: 's-3-12', seq: 12, grade: 3, classNum: 8, studentNum: 16, name: '정시은', seatNum: '3-12', phone: '010-2483-0799', parentPhone: '010-2920-0710', academyDays: [], active: true },
+  { id: 's-3-13', seq: 13, grade: 3, classNum: 9, studentNum: 1, name: '강희주', seatNum: '3-13', phone: '010-7616-3151', parentPhone: '010-3899-0097', academyDays: [], active: true },
+  { id: 's-3-14', seq: 14, grade: 3, classNum: 9, studentNum: 19, name: '최보윤', seatNum: '3-14', phone: '010-7540-7946', parentPhone: '010-2294-7946', academyDays: [], active: true },
+  { id: 's-3-15', seq: 15, grade: 3, classNum: 10, studentNum: 19, name: '현려경', seatNum: '3-15', phone: '010-3218-6822', parentPhone: '010-8430-2722', academyDays: [], active: true },
+
+  // 2학년 (15명)
+  { id: 's-2-1', seq: 1, grade: 2, classNum: 1, studentNum: 6, name: '김도은', seatNum: '2-01', phone: '010-3184-7833', parentPhone: '010-9146-1126', academyDays: [], active: true },
+  { id: 's-2-2', seq: 2, grade: 2, classNum: 1, studentNum: 8, name: '김태연', seatNum: '2-02', phone: '010-3443-2407', parentPhone: '010-7224-3709', academyDays: [], active: true },
+  { id: 's-2-3', seq: 3, grade: 2, classNum: 2, studentNum: 5, name: '김나현', seatNum: '2-03', phone: '010-7687-5637', parentPhone: '010-5311-5637', academyDays: [], active: true },
+  { id: 's-2-4', seq: 4, grade: 2, classNum: 2, studentNum: 6, name: '김세빈', seatNum: '2-04', phone: '010-4860-4766', parentPhone: '010-6374-4766', academyDays: [], active: true },
+  { id: 's-2-5', seq: 5, grade: 2, classNum: 3, studentNum: 6, name: '김은성', seatNum: '2-05', phone: '010-7401-9775', parentPhone: '010-8884-9775', academyDays: [], active: true },
+  { id: 's-2-6', seq: 6, grade: 2, classNum: 4, studentNum: 7, name: '임수민', seatNum: '2-06', phone: '010-9512-4648', parentPhone: '010-9866-7415', academyDays: [], active: true },
+  { id: 's-2-7', seq: 7, grade: 2, classNum: 5, studentNum: 5, name: '김은서', seatNum: '2-07', phone: '010-9561-9991', parentPhone: '010-9360-9992', academyDays: [], active: true },
+  { id: 's-2-9', seq: 8, grade: 2, classNum: 6, studentNum: 1, name: '권지연', seatNum: '2-08', phone: '010-3993-2294', parentPhone: '010-8324-2294', academyDays: [], active: true },
+  { id: 's-2-10', seq: 9, grade: 2, classNum: 6, studentNum: 16, name: '조아인', seatNum: '2-09', phone: '010-9231-1833', parentPhone: '010-8777-8388', academyDays: [], active: true },
+  { id: 's-2-11', seq: 10, grade: 2, classNum: 6, studentNum: 19, name: '황하진', seatNum: '2-10', phone: '010-4031-2134', parentPhone: '010-4779-5877', academyDays: [], active: true },
+  { id: 's-2-12', seq: 11, grade: 2, classNum: 7, studentNum: 17, name: '조현지', seatNum: '2-11', phone: '010-4192-2465', parentPhone: '010-9247-2465', academyDays: [], active: true },
+  { id: 's-2-13', seq: 12, grade: 2, classNum: 7, studentNum: 19, name: '황수연', seatNum: '2-12', phone: '010-6265-6640', parentPhone: '010-4107-6640', academyDays: [], active: true },
+  { id: 's-2-14', seq: 13, grade: 2, classNum: 8, studentNum: 14, name: '은예진', seatNum: '2-13', phone: '010-7266-1073', parentPhone: '010-7220-2542', academyDays: [], active: true },
+  { id: 's-2-15', seq: 14, grade: 2, classNum: 9, studentNum: 3, name: '김수안', seatNum: '2-14', phone: '010-8616-5414', parentPhone: '010-4876-5414', academyDays: [], active: true },
+  { id: 's-2-16', seq: 15, grade: 2, classNum: 9, studentNum: 12, name: '윤시현', seatNum: '2-15', phone: '010-9813-0215', parentPhone: '010-9458-8971', academyDays: [], active: true },
+
+  // 1학년 (15명)
+  { id: 's-1-1', seq: 1, grade: 1, classNum: 1, studentNum: 3, name: '김민송', seatNum: '1-01', phone: '010-7648-7440', parentPhone: '010-7608-7440', academyDays: [], active: true },
+  { id: 's-1-2', seq: 2, grade: 1, classNum: 1, studentNum: 4, name: '김봄', seatNum: '1-02', phone: '010-4044-4706', parentPhone: '010-9639-1054', academyDays: [], active: true },
+  { id: 's-1-3', seq: 3, grade: 1, classNum: 2, studentNum: 10, name: '우채원', seatNum: '1-03', phone: '010-2169-5247', parentPhone: '010-7139-5247', academyDays: [], active: true },
+  { id: 's-1-4', seq: 4, grade: 1, classNum: 4, studentNum: 7, name: '문지영', seatNum: '1-04', phone: '010-3974-1251', parentPhone: '010-8238-1251', academyDays: [], active: true },
+  { id: 's-1-5', seq: 5, grade: 1, classNum: 4, studentNum: 14, name: '이민준', seatNum: '1-05', phone: '010-2509-1964', parentPhone: '010-3645-1964', academyDays: [], active: true },
+  { id: 's-1-6', seq: 6, grade: 1, classNum: 4, studentNum: 18, name: '전은설', seatNum: '1-06', phone: '010-8586-1456', parentPhone: '010-9040-1456', academyDays: [], active: true },
+  { id: 's-1-7', seq: 7, grade: 1, classNum: 5, studentNum: 3, name: '김도연', seatNum: '1-07', phone: '010-4079-6507', parentPhone: '010-2896-6507', academyDays: [], active: true },
+  { id: 's-1-8', seq: 8, grade: 1, classNum: 5, studentNum: 20, name: '지은서', seatNum: '1-08', phone: '010-2820-4028', parentPhone: '010-6300-4028', academyDays: [], active: true },
+  { id: 's-1-9', seq: 9, grade: 1, classNum: 5, studentNum: 21, name: '하윤성', seatNum: '1-09', phone: '010-6709-3245', parentPhone: '010-9960-0838', academyDays: [], active: true },
+  { id: 's-1-10', seq: 10, grade: 1, classNum: 8, studentNum: 13, name: '임지호', seatNum: '1-10', phone: '010-9514-4648', parentPhone: '010-9866-7415', academyDays: [], active: true },
+  { id: 's-1-11', seq: 11, grade: 1, classNum: 9, studentNum: 3, name: '김민정', seatNum: '1-11', phone: '010-4798-2572', parentPhone: '010-6376-2572', academyDays: [], active: true },
+  { id: 's-1-12', seq: 12, grade: 1, classNum: 9, studentNum: 12, name: '양태훈', seatNum: '1-12', phone: '010-9584-5263', parentPhone: '010-9945-5263', academyDays: [], active: true },
+  { id: 's-1-13', seq: 13, grade: 1, classNum: 9, studentNum: 20, name: '조하린', seatNum: '1-13', phone: '010-9545-7090', parentPhone: '010-2624-7090', academyDays: [], active: true },
+  { id: 's-1-14', seq: 14, grade: 1, classNum: 10, studentNum: 9, name: '배준서', seatNum: '1-14', phone: '010-7554-2898', parentPhone: '010-3063-2898', academyDays: [], active: true },
+  { id: 's-1-15', seq: 15, grade: 1, classNum: 10, studentNum: 19, name: '이하영', seatNum: '1-15', phone: '010-9206-4794', parentPhone: '010-5206-4794', academyDays: [], active: true },
+];
+
+export const KOREAN_DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
+
+/**
+ * 기본 학사일정 및 사용자 추가 학교 행사 목록
+ */
+export const DEFAULT_SCHOOL_EVENTS: SchoolEvent[] = [
+  // 8월
+  { id: 'evt-2026-08-15', dateStr: '2026-08-15', title: '광복절', excludeMorning: true, excludeNight: true, isHoliday: true },
+  
+  // 9월
+  { id: 'evt-2026-09-02', dateStr: '2026-09-02', title: '모의고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-09-23', dateStr: '2026-09-23', title: '재량휴업일', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-09-24', dateStr: '2026-09-24', title: '추석 연휴', excludeMorning: true, excludeNight: true, isHoliday: true },
+  { id: 'evt-2026-09-25', dateStr: '2026-09-25', title: '추석', excludeMorning: true, excludeNight: true, isHoliday: true },
+  { id: 'evt-2026-09-26', dateStr: '2026-09-26', title: '추석 연휴', excludeMorning: true, excludeNight: true, isHoliday: true },
+
+  // 10월
+  { id: 'evt-2026-10-03', dateStr: '2026-10-03', title: '개천절', excludeMorning: true, excludeNight: true, isHoliday: true },
+  { id: 'evt-2026-10-05', dateStr: '2026-10-05', title: '재량휴업일', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-10-09', dateStr: '2026-10-09', title: '한글날', excludeMorning: true, excludeNight: true, isHoliday: true },
+  { id: 'evt-2026-10-13', dateStr: '2026-10-13', title: '중간고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-10-14', dateStr: '2026-10-14', title: '중간고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-10-15', dateStr: '2026-10-15', title: '중간고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-10-16', dateStr: '2026-10-16', title: '중간고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-10-20', dateStr: '2026-10-20', title: '모의고사', excludeMorning: true, excludeNight: true },
+
+  // 11월
+  { id: 'evt-2026-11-18', dateStr: '2026-11-18', title: '수능 예비소집', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-11-19', dateStr: '2026-11-19', title: '대학수학능력시험(수능)', excludeMorning: true, excludeNight: true, isCsat: true },
+
+  // 12월
+  { id: 'evt-2026-12-15', dateStr: '2026-12-15', title: '기말고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-12-16', dateStr: '2026-12-16', title: '기말고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-12-17', dateStr: '2026-12-17', title: '기말고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-12-18', dateStr: '2026-12-18', title: '기말고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-12-19', dateStr: '2026-12-19', title: '기말고사', excludeMorning: true, excludeNight: true },
+  { id: 'evt-2026-12-25', dateStr: '2026-12-25', title: '성탄절', excludeMorning: true, excludeNight: true, isHoliday: true },
+];
+
+export const SPECIAL_CALENDAR_EVENTS: Record<string, { label: string; isHoliday: boolean }> = Object.fromEntries(
+  DEFAULT_SCHOOL_EVENTS.map(evt => [evt.dateStr, { label: evt.title, isHoliday: !!evt.isHoliday }])
+);
+
+/**
+ * Generate school days for a given year & month and session.
+ * Automatically excludes:
+ * 1) Weekends
+ * 2) National public holidays
+ * 3) User-defined school schedule (모의고사, 재량휴업일, 중간고사, 수능, 기말고사 등)
+ * 4) 야간 자율학습(night session): 수요일 야자 미실시 여부 반영 (includeWednesdaysInNight가 false일 때 수요일 자동 제외)
+ */
+export function generateMonthDays(
+  year: number,
+  month: number,
+  session: SessionType = 'morning',
+  onlySpecificDates?: number[],
+  customEvents?: SchoolEvent[],
+  includeWednesdaysInNight: boolean = false
+): DayConfig[] {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const days: DayConfig[] = [];
+
+  // Build event map for easy lookup
+  const eventsList = customEvents || DEFAULT_SCHOOL_EVENTS;
+  const eventMap = new Map<string, SchoolEvent>();
+  eventsList.forEach(e => eventMap.set(e.dateStr, e));
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateObj = new Date(year, month - 1, d);
+    const dayOfWeekIdx = dateObj.getDay();
+    const dayOfWeek = KOREAN_DAY_NAMES[dayOfWeekIdx];
+    const isWeekend = dayOfWeekIdx === 0 || dayOfWeekIdx === 6;
+    const isWednesday = dayOfWeek === '수';
+    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+    const eventInfo = eventMap.get(dateStr);
+    const isHoliday = isWeekend || !!eventInfo?.isHoliday;
+    
+    // Check if excluded by school event for the specific session
+    const isExcludedByEvent = session === 'morning' 
+      ? !!eventInfo?.excludeMorning 
+      : !!eventInfo?.excludeNight;
+
+    // Determine default enabled state:
+    let isEnabled = false;
+
+    if (onlySpecificDates && onlySpecificDates.length > 0) {
+      if (session === 'night' && isWednesday && !includeWednesdaysInNight) {
+        isEnabled = false;
+      } else {
+        isEnabled = onlySpecificDates.includes(d);
+      }
+    } else if (year === 2026 && month === 8) {
+      // 8월은 19일부터 자율학습 시작 (개학일정)
+      if (session === 'night') {
+        const isNightWedAllowed = includeWednesdaysInNight || !isWednesday;
+        isEnabled = !isWeekend && isNightWedAllowed && d >= 19 && !isExcludedByEvent && !isHoliday;
+      } else {
+        isEnabled = !isWeekend && d >= 19 && !isExcludedByEvent && !isHoliday;
+      }
+    } else {
+      // 평일이면서 공휴일 및 해당 세션 미실시 행사가 없는 날
+      if (session === 'night') {
+        const isNightWedAllowed = includeWednesdaysInNight || !isWednesday;
+        isEnabled = !isWeekend && isNightWedAllowed && !isHoliday && !isExcludedByEvent;
+      } else {
+        isEnabled = !isWeekend && !isHoliday && !isExcludedByEvent;
+      }
+    }
+
+    let customLabel = eventInfo?.title;
+    if (!customLabel && session === 'night' && isWednesday && !isWeekend && !includeWednesdaysInNight) {
+      customLabel = '수요야자X';
+    }
+
+    days.push({
+      dateStr,
+      dayNum: d,
+      dayOfWeek,
+      isHoliday,
+      label: customLabel,
+      enabled: isEnabled,
+    });
+  }
+
+  return days;
+}
+
+/**
+ * Start with empty attendance records so teachers can start fresh
+ */
+export function generateEmptyRecords(): Record<string, { status: AttendanceStatus; reason?: string }> {
+  return {};
+}

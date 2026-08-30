@@ -1,0 +1,8 @@
+{
+  "name": "Remix 미래인재반 자율학습 출석부 관리 시스템_v1.05",
+  "description": "아침 및 저녁 자율학습 출석부를 월별/일별/좌석배치도별로 간편하게 관리하고 구글 스프레드시트와 연동 및 통계를 지원하는 스마트 출결 관리 시스템",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
