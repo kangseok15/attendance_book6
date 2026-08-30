@@ -61,8 +61,8 @@ export async function saveRecordToFirestore(
     const monthKey = `records_${year}_${month}`;
 
     const recordData: Record<string, any> = { status };
-    if (reason) recordData.reason = reason;
-    if (checkInTime) recordData.checkInTime = checkInTime;
+    if (reason !== undefined) recordData.reason = reason;
+    if (checkInTime !== undefined) recordData.checkInTime = checkInTime;
 
     const docRef = doc(db, 'attendance', monthKey);
     await setDoc(docRef, { [key]: recordData }, { merge: true });
@@ -97,8 +97,8 @@ export async function saveBatchToFirestore(
     updates.forEach(u => {
       const key = `${u.studentId}_${u.session}_${u.dateStr}`;
       const rec: Record<string, any> = { status: u.status };
-      if (u.reason) rec.reason = u.reason;
-      if (u.checkInTime) rec.checkInTime = u.checkInTime;
+      if (u.reason !== undefined) rec.reason = u.reason;
+      if (u.checkInTime !== undefined) rec.checkInTime = u.checkInTime;
       batchData[key] = rec;
     });
 
@@ -178,6 +178,74 @@ export function subscribeToFirestoreAttendanceState(
   } catch (e) {
     console.warn('[Firebase] Listener registration failed:', e);
     return () => {};
+  }
+}
+
+/**
+ * 데이터 전체 복원 (Full Restore)
+ */
+export async function saveFullRestoreToFirestore(
+  records: Record<string, AttendanceRecord>,
+  students?: Student[]
+) {
+  try {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const updateData: any = { records };
+    if (students && students.length > 0) {
+      updateData.students = students;
+    }
+    await setDoc(masterRef, updateData);
+
+    if (students && students.length > 0) {
+      const studentsRef = doc(db, 'attendance', 'students');
+      await setDoc(studentsRef, { list: students });
+    }
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveFullRestoreToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * 출결 비우기/초기화 (Clear State)
+ */
+export async function clearFirestoreAttendanceState(
+  type: 'single-day' | 'month-session' | 'all',
+  payload?: any
+) {
+  try {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const docSnap = await getDoc(masterRef);
+    if (!docSnap.exists()) return true;
+
+    const data = docSnap.data();
+    const currentRecords = { ...(data.records || {}) };
+
+    if (type === 'single-day' && payload?.dateStr && payload?.session) {
+      Object.keys(currentRecords).forEach(key => {
+        if (key.endsWith(`_${payload.session}_${payload.dateStr}`)) {
+          delete currentRecords[key];
+        }
+      });
+    } else if (type === 'month-session' && payload?.year && payload?.month && payload?.session) {
+      const prefix = `${payload.year}-${String(payload.month).padStart(2, '0')}`;
+      Object.keys(currentRecords).forEach(key => {
+        const parts = key.split('_');
+        if (parts.length >= 3 && parts[1] === payload.session && parts[2].startsWith(prefix)) {
+          delete currentRecords[key];
+        }
+      });
+    } else if (type === 'all') {
+      await setDoc(masterRef, { records: {} }, { merge: true });
+      return true;
+    }
+
+    await setDoc(masterRef, { records: currentRecords }, { merge: true });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] clearFirestoreAttendanceState error:', e);
+    return false;
   }
 }
 
