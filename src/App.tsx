@@ -30,17 +30,9 @@ import {
   saveIncludeWednesdaysInNight,
   loadGrade3Exclusion,
   saveGrade3Exclusion,
-  getAcademicYear
+  getAcademicYear,
+  saveSnapshot
 } from './utils/storage';
-import {
-  fetchServerAttendanceState,
-  sendRecordUpdateToServer,
-  sendBatchUpdateToServer,
-  sendClearAttendanceToServer,
-  sendStudentsUpdateToServer,
-  sendFullRestoreToServer
-} from './utils/apiSync';
-import { subscribeToFirestoreAttendanceState } from './utils/firebase';
 import { Header, ViewTab } from './components/Header';
 import { MonthlyGridView } from './components/MonthlyGridView';
 import { DailyCheckinView } from './components/DailyCheckinView';
@@ -56,21 +48,42 @@ import { KioskAttendanceView } from './components/KioskAttendanceView';
 import { TeacherMobileView } from './components/TeacherMobileView';
 import { SchoolLogo } from './components/SchoolLogo';
 import { GraduationCap, Sparkles } from 'lucide-react';
-import { getRecordKey, isStudentExcluded, isStudentExcludedOnDate, sortStudents, getBestActiveDate, getTodayOrClosestActiveDate, getAutoSessionByCurrentTime } from './utils/attendanceHelpers';
-import { saveSnapshot } from './utils/storage';
+import { 
+  getRecordKey, 
+  isStudentExcluded, 
+  isStudentExcludedOnDate, 
+  sortStudents, 
+  getBestActiveDate, 
+  getTodayOrClosestActiveDate, 
+  getAutoSessionByCurrentTime 
+} from './utils/attendanceHelpers';
+
+// Firebase Firestore 직접 연동
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { db } from './utils/firebase';
+
+// undefined 방지 헬퍼
+const sanitizeForFirestore = (record: AttendanceRecord): Record<string, any> => {
+  const sanitized: Record<string, any> = {
+    status: record.status
+  };
+  if (record.reason !== undefined && record.reason !== null) {
+    sanitized.reason = record.reason;
+  }
+  if (record.checkInTime !== undefined && record.checkInTime !== null) {
+    sanitized.checkInTime = record.checkInTime;
+  }
+  return sanitized;
+};
 
 export default function App() {
-  // Helper to get initial role from URL param, hash or storage
   const getInitialRole = (): UserRole => {
     if (typeof window !== 'undefined') {
-      // 1. Search Query Params (?role=teacher)
       const params = new URLSearchParams(window.location.search);
       const urlRole = params.get('role');
       if (urlRole === 'admin' || urlRole === 'teacher' || urlRole === 'teacher_mobile' || urlRole === 'student') {
         return urlRole as UserRole;
       }
-
-      // 2. Hash params (#role=teacher or #teacher)
       const hash = window.location.hash.replace(/^#/, '');
       if (hash === 'admin' || hash === 'teacher' || hash === 'teacher_mobile' || hash === 'student') {
         return hash as UserRole;
@@ -84,7 +97,6 @@ export default function App() {
     return loadUserRole();
   };
 
-  // Helper to get initial tab from URL if present (defaults to kiosk for student, mobile_teacher for teacher_mobile)
   const getInitialTab = (role: UserRole): ViewTab => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -96,21 +108,15 @@ export default function App() {
         return 'kiosk';
       }
     }
-    if (role === 'student') {
-      return 'kiosk';
-    }
-    if (role === 'teacher_mobile') {
-      return 'mobile_teacher';
-    }
+    if (role === 'student') return 'kiosk';
+    if (role === 'teacher_mobile') return 'mobile_teacher';
     return 'monthly';
   };
 
-  // User Role State: 'admin' | 'teacher' | 'teacher_mobile' | 'student'
   const [userRole, setUserRole] = useState<UserRole>(() => getInitialRole());
   const [isRoleModalOpen, setIsRoleModalOpen] = useState(false);
   const [targetRoleToSwitch, setTargetRoleToSwitch] = useState<UserRole>(userRole);
 
-  // Sync URL when userRole changes
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
@@ -121,7 +127,6 @@ export default function App() {
     }
   }, [userRole]);
 
-  // Listen for browser popstate, hashchange, or direct URL param changes
   useEffect(() => {
     const handleUrlChange = () => {
       const params = new URLSearchParams(window.location.search);
@@ -155,13 +160,11 @@ export default function App() {
     };
   }, []);
 
-  // Navigation & Core State (defaults to 'kiosk' for student)
   const [activeTab, setActiveTab] = useState<ViewTab>(() => getInitialTab(getInitialRole()));
   const [session, setSession] = useState<SessionType>('morning');
   const [year, setYear] = useState<number>(2026);
   const [month, setMonth] = useState<number>(8);
 
-  // Sync tab in URL
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
@@ -172,13 +175,10 @@ export default function App() {
     }
   }, [activeTab]);
 
-  // Auto-sync session for Kiosk mode: morning (00:00~12:00) vs night (12:01~23:59)
   useEffect(() => {
     if (activeTab === 'kiosk') {
       const autoSession = getAutoSessionByCurrentTime();
       setSession(autoSession);
-
-      // Periodically re-check every 30 seconds to switch when crossing 12:00 noon while in Kiosk
       const interval = setInterval(() => {
         setSession(getAutoSessionByCurrentTime());
       }, 30000);
@@ -186,7 +186,56 @@ export default function App() {
     }
   }, [activeTab]);
 
-  // Handle Role Change
+  const [students, setStudents] = useState<Student[]>(() => loadStudents());
+  const [records, setRecords] = useState<Record<string, AttendanceRecord>>(() => 
+    loadAttendanceRecords()
+  );
+
+  const [schoolEvents, setSchoolEvents] = useState<SchoolEvent[]>(() => loadSchoolEvents());
+  const [includeWednesdaysInNight, setIncludeWednesdaysInNight] = useState<boolean>(() => loadIncludeWednesdaysInNight());
+  const [grade3Exclusion, setGrade3Exclusion] = useState<Grade3ExclusionConfig>(() => loadGrade3Exclusion());
+
+  const [lastSyncedTime, setLastSyncedTime] = useState<string>(() => {
+    const n = new Date();
+    return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
+  });
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncToast, setSyncToast] = useState<string | null>(null);
+
+  // 🔥 Firestore 실시간 양방향 동기화 리스너 (학생 명단 + 해당 연/월 출석 기록)
+  useEffect(() => {
+    // 1. 학생 명단 실시간 수신
+    const unsubStudents = onSnapshot(doc(db, 'attendance', 'students'), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (Array.isArray(data.list) && data.list.length > 0) {
+          setStudents(data.list);
+          saveStudents(data.list);
+        }
+      }
+    });
+
+    // 2. 출석 기록 실시간 수신
+    const monthKey = `records_${year}_${String(month).padStart(2, '0')}`;
+    const unsubRecords = onSnapshot(doc(db, 'attendance', monthKey), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as Record<string, AttendanceRecord>;
+        setRecords(prev => {
+          const merged = { ...prev, ...data };
+          saveAttendanceRecords(merged);
+          return merged;
+        });
+      }
+      const now = new Date();
+      setLastSyncedTime(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`);
+    });
+
+    return () => {
+      unsubStudents();
+      unsubRecords();
+    };
+  }, [year, month]);
+
   const handleRoleChange = (newRole: UserRole) => {
     setUserRole(newRole);
     saveUserRole(newRole);
@@ -200,51 +249,37 @@ export default function App() {
         setSelectedDateStr(getTodayOrClosestActiveDate(activeDays));
       }
     } else if (newRole === 'teacher') {
-      // Teacher PC mode only has monthly and analytics
       if (activeTab === 'daily' || activeTab === 'students' || activeTab === 'kiosk' || activeTab === 'mobile_teacher') {
         setActiveTab('monthly');
       }
     } else if (newRole === 'admin') {
-      // If was in kiosk or mobile_teacher, switch to monthly
       if (activeTab === 'kiosk' || activeTab === 'mobile_teacher') {
         setActiveTab('monthly');
       }
     }
   };
 
-  // Open role modal
   const handleOpenRoleModal = () => {
     setTargetRoleToSwitch(userRole);
     setIsRoleModalOpen(true);
   };
 
-  // Students & Records (Empty by default)
-  const [students, setStudents] = useState<Student[]>(() => loadStudents());
-  const [records, setRecords] = useState<Record<string, AttendanceRecord>>(() => 
-    loadAttendanceRecords()
-  );
-
-  // Update students handler: always sort by grade, classNum, studentNum, name and reassign seq
-  const handleUpdateStudents = (newStudents: Student[]) => {
+  const handleUpdateStudents = async (newStudents: Student[]) => {
     const sorted = sortStudents(newStudents, [3, 2, 1], true);
     setStudents(sorted);
     saveStudents(sorted);
-    if (userRole === 'admin') {
-      sendStudentsUpdateToServer(sorted, userRole);
+    try {
+      await setDoc(doc(db, 'attendance', 'students'), { list: sorted });
+    } catch (e) {
+      console.error('Firestore 학생 업데이트 실패:', e);
     }
   };
-
-  // School Events and Wednesday Night study state
-  const [schoolEvents, setSchoolEvents] = useState<SchoolEvent[]>(() => loadSchoolEvents());
-  const [includeWednesdaysInNight, setIncludeWednesdaysInNight] = useState<boolean>(() => loadIncludeWednesdaysInNight());
-  const [grade3Exclusion, setGrade3Exclusion] = useState<Grade3ExclusionConfig>(() => loadGrade3Exclusion());
 
   const handleUpdateGrade3Exclusion = (newConfig: Grade3ExclusionConfig) => {
     setGrade3Exclusion(newConfig);
     saveGrade3Exclusion(newConfig);
   };
 
-  // Month days configuration per session
   const [daysConfig, setDaysConfig] = useState<{
     morning: DayConfig[];
     night: DayConfig[];
@@ -257,21 +292,16 @@ export default function App() {
     };
   });
 
-  // Current session's full month days
   const allDaysInMonth = daysConfig[session] || [];
-
-  // Active (enabled) days in this month for current session
   const activeDays = useMemo(() => {
     return allDaysInMonth.filter(d => d.enabled);
   }, [allDaysInMonth]);
 
-  // Selected date for Daily Checkin View (Default to today or closest active date)
   const [selectedDateStr, setSelectedDateStr] = useState<string>(() => {
     const initMorningActive = generateMonthDays(2026, 8, 'morning', [19, 20, 21, 24, 25, 26, 27, 28, 31]).filter(d => d.enabled);
     return getTodayOrClosestActiveDate(initMorningActive, 2026, 8);
   });
 
-  // Adjust selectedDateStr if it's not active in current session or when session changes
   useEffect(() => {
     if (activeDays.length > 0) {
       const isCurrentActive = activeDays.some(d => d.dateStr === selectedDateStr);
@@ -281,7 +311,6 @@ export default function App() {
     }
   }, [session, activeDays, year, month, selectedDateStr]);
 
-  // Tab change handler: when clicking 'daily' or 'mobile_teacher', always ensure today's date is immediately selected
   const handleTabChange = (tab: ViewTab) => {
     setActiveTab(tab);
     if ((tab === 'daily' || tab === 'mobile_teacher') && activeDays.length > 0) {
@@ -289,7 +318,6 @@ export default function App() {
     }
   };
 
-  // Modals state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isMonthConfigModalOpen, setIsMonthConfigModalOpen] = useState(false);
   const [isClearAttendanceModalOpen, setIsClearAttendanceModalOpen] = useState(false);
@@ -304,176 +332,20 @@ export default function App() {
     list: [],
   });
 
-  // Sync state & Cross-tab sync
-  const [lastSyncedTime, setLastSyncedTime] = useState<string>(() => {
-    const n = new Date();
-    return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
-  });
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [syncToast, setSyncToast] = useState<string | null>(null);
-
-  // Initial server load & continuous live polling (every 3.5s + on window focus)
-  useEffect(() => {
-    let isMounted = true;
-
-    const pullServerState = async (silent = true) => {
-      try {
-        const data = await fetchServerAttendanceState();
-        if (data && data.success && isMounted) {
-          if (Array.isArray(data.students) && data.students.length > 0) {
-            setStudents(data.students);
-            if (userRole !== 'teacher' && userRole !== 'teacher_mobile') {
-              saveStudents(data.students);
-            }
-          }
-          if (data.records && Object.keys(data.records).length > 0) {
-            setRecords((prev) => {
-              const merged = { ...prev, ...data.records };
-              if (userRole !== 'teacher' && userRole !== 'teacher_mobile') {
-                saveAttendanceRecords(merged);
-              }
-              return merged;
-            });
-          }
-          const now = new Date();
-          const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-          setLastSyncedTime(timeStr);
-        }
-      } catch (err) {
-        if (!silent) console.warn('[Sync] Poll error:', err);
-      }
-    };
-
-    // 1. Initial pull immediately
-    pullServerState(false);
-
-    // 2. Real-time instant sync via Firebase Firestore (<0.5s multi-kiosk sync)
-    const unsubFirestore = subscribeToFirestoreAttendanceState((state) => {
-      if (!isMounted) return;
-      if (Array.isArray(state.students) && state.students.length > 0) {
-        setStudents(state.students);
-        if (userRole !== 'teacher' && userRole !== 'teacher_mobile') {
-          saveStudents(state.students);
-        }
-      }
-      if (state.records && Object.keys(state.records).length > 0) {
-        setRecords((prev) => {
-          const merged = { ...prev, ...state.records };
-          if (userRole !== 'teacher' && userRole !== 'teacher_mobile') {
-            saveAttendanceRecords(merged);
-          }
-          return merged;
-        });
-      }
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-      setLastSyncedTime(timeStr);
-    });
-
-    // 3. Periodic background poll every 4 seconds as redundant backup
-    const interval = setInterval(() => {
-      pullServerState(true);
-    }, 4000);
-
-    // 4. Pull when window/tab is focused
-    const handleFocus = () => pullServerState(true);
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') pullServerState(true);
-    });
-
-    return () => {
-      isMounted = false;
-      if (unsubFirestore) unsubFirestore();
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [userRole]);
-
-  // Cross-tab synchronization via StorageEvent & BroadcastChannel
-  useEffect(() => {
-    const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key && (e.key.includes('students') || e.key.includes('records') || e.key.includes('custom_days'))) {
-        setStudents(loadStudents());
-        setRecords(loadAttendanceRecords());
-        const n = new Date();
-        setLastSyncedTime(`${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`);
-      }
-    };
-
-    let bc: BroadcastChannel | null = null;
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        bc = new BroadcastChannel('soongshin_attendance_sync');
-        bc.onmessage = (event) => {
-          if (event.data && event.data.type === 'SYNC') {
-            setStudents(loadStudents());
-            setRecords(loadAttendanceRecords());
-            const n = new Date();
-            setLastSyncedTime(`${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`);
-          }
-        };
-      } catch (e) {
-        console.warn('BroadcastChannel error:', e);
-      }
-    }
-
-    window.addEventListener('storage', handleStorageEvent);
-    return () => {
-      window.removeEventListener('storage', handleStorageEvent);
-      if (bc) bc.close();
-    };
-  }, []);
-
-  // Manual sync trigger
-  const handleSync = async () => {
+  const handleSync = () => {
     setIsSyncing(true);
-    try {
-      const serverData = await fetchServerAttendanceState();
-      if (serverData && serverData.success) {
-        if (serverData.students && serverData.students.length > 0) {
-          setStudents(serverData.students);
-          if (userRole !== 'teacher') saveStudents(serverData.students);
-        }
-        if (serverData.records) {
-          setRecords(serverData.records);
-          if (userRole !== 'teacher') saveAttendanceRecords(serverData.records);
-        }
-      } else {
-        // Fallback to local
-        setStudents(loadStudents());
-        setRecords(loadAttendanceRecords());
-      }
-    } catch (e) {
-      console.warn('Manual sync fallback:', e);
+    setTimeout(() => {
       setStudents(loadStudents());
       setRecords(loadAttendanceRecords());
-    } finally {
       const now = new Date();
       const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
       setLastSyncedTime(timeStr);
       setIsSyncing(false);
-
-      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-        try {
-          const bc = new BroadcastChannel('soongshin_attendance_sync');
-          bc.postMessage({ type: 'SYNC', time: timeStr });
-          bc.close();
-        } catch (e) {
-          // ignore
-        }
-      }
-
-      if (userRole === 'teacher') {
-        setSyncToast(`[담임 교사 모드] 중앙 서버 최신 출결 데이터로 동기화 완료 (${timeStr})`);
-      } else {
-        setSyncToast(`데이터가 최신 상태로 동기화되었습니다 (${timeStr})`);
-      }
+      setSyncToast(`클라우드 최신 출결 데이터로 동기화 완료 (${timeStr})`);
       setTimeout(() => setSyncToast(null), 3000);
-    }
+    }, 300);
   };
 
-  // When year or month changes (1월 ~ 12월), regenerate month days for both sessions
   const handleSetYearMonth = (newYear: number, newMonth: number) => {
     setYear(newYear);
     setMonth(newMonth);
@@ -497,7 +369,6 @@ export default function App() {
     }
   };
 
-  // School Events Handlers
   const handleAddSchoolEvent = (eventData: Omit<SchoolEvent, 'id'>) => {
     const newEvent: SchoolEvent = {
       ...eventData,
@@ -507,7 +378,6 @@ export default function App() {
     setSchoolEvents(updated);
     saveSchoolEvents(updated);
 
-    // Recompute days config for current month
     const newMorningDays = generateMonthDays(year, month, 'morning', undefined, updated, includeWednesdaysInNight);
     const newNightDays = generateMonthDays(year, month, 'night', undefined, updated, includeWednesdaysInNight);
     setDaysConfig({
@@ -541,10 +411,8 @@ export default function App() {
     });
   };
 
-  // Reset School Events Handlers (Past year events vs All events) - Attendance records are NEVER deleted!
   const handleResetPastYearEvents = () => {
     const currentAcademicYear = getAcademicYear(year, month);
-    // Keep events of the current academic year or future, remove events belonging to earlier academic years
     const updated = schoolEvents.filter(e => {
       const parts = e.dateStr.split('-');
       const eY = parseInt(parts[0], 10);
@@ -563,7 +431,7 @@ export default function App() {
       night: newNightDays,
     });
 
-    setSyncToast('📅 이전 학년도 학교 행사가 정리되었습니다. (출결 기록은 100% 영구 보존됩니다.)');
+    setSyncToast('📅 이전 학년도 학교 행사가 정리되었습니다. (출결 기록은 100% 보존됩니다.)');
     setTimeout(() => setSyncToast(null), 3500);
   };
 
@@ -579,21 +447,12 @@ export default function App() {
       night: newNightDays,
     });
 
-    setSyncToast('📅 학교 행사 목록이 초기화되었습니다. (출결 기록은 100% 영구 보존됩니다.)');
+    setSyncToast('📅 학교 행사 목록이 초기화되었습니다.');
     setTimeout(() => setSyncToast(null), 3500);
   };
 
-  // Sync state to LocalStorage
-  useEffect(() => {
-    saveStudents(students);
-  }, [students]);
-
-  useEffect(() => {
-    saveAttendanceRecords(records);
-  }, [records]);
-
-  // Update Single Record (with automatic check-in timestamp and auto-clear reason when updated)
-  const handleUpdateRecord = (
+  // 🔥 단일 출결 수정 (핸드폰/PC 즉시 Firestore 클라우드 실시간 전송)
+  const handleUpdateRecord = async (
     studentId: string,
     dateStr: string,
     status: AttendanceStatus,
@@ -611,59 +470,45 @@ export default function App() {
         : (records[key]?.checkInTime || currentTimestamp);
     }
 
-    // 새로운 출결 데이터가 입력되거나 상태가 변경되면 이전 사유는 자동 삭제
-    // (명시적으로 non-empty reason이 입력된 경우에만 해당 사유를 저장)
     let finalReason: string | undefined = undefined;
     if (typeof reason === 'string' && reason.trim() !== '') {
       finalReason = reason.trim();
-    } else {
-      finalReason = undefined;
     }
+
+    const updatedRecord: AttendanceRecord = {
+      status,
+      reason: finalReason,
+      checkInTime: finalCheckInTime,
+    };
 
     setRecords(prev => {
       const updated = {
         ...prev,
-        [key]: {
-          status,
-          reason: finalReason,
-          checkInTime: finalCheckInTime,
-        },
+        [key]: updatedRecord,
       };
-      if (userRole !== 'teacher') {
-        saveAttendanceRecords(updated);
-      }
+      saveAttendanceRecords(updated);
       return updated;
     });
 
-    if (userRole !== 'teacher') {
-      sendRecordUpdateToServer(
-        studentId,
-        session,
-        dateStr,
-        status,
-        finalReason,
-        finalCheckInTime,
-        userRole
-      );
+    // Firestore에 직접 저장
+    const monthKey = `records_${year}_${String(month).padStart(2, '0')}`;
+    try {
+      const firestoreSafeData = sanitizeForFirestore(updatedRecord);
+      await setDoc(doc(db, 'attendance', monthKey), { [key]: firestoreSafeData }, { merge: true });
+    } catch (e) {
+      console.error('Firestore 출석 기록 저장 실패:', e);
     }
   };
 
-  // Batch Update Entire Day for all or specific grade
-  const handleBatchUpdateDay = (
+  // 🔥 일괄 출결 처리 (Firestore 실시간 전송)
+  const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
     gradeFilter?: number
   ) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const updates: Array<{
-      studentId: string;
-      session: SessionType;
-      dateStr: string;
-      status: AttendanceStatus;
-      reason?: string;
-      checkInTime?: string;
-    }> = [];
+    const changedBatch: Record<string, any> = {};
 
     setRecords(prev => {
       const updated = { ...prev };
@@ -672,47 +517,34 @@ export default function App() {
         .forEach(st => {
           const key = getRecordKey(st.id, session, dateStr);
           const recCheckIn = status !== 'NONE' ? (prev[key]?.checkInTime || currentTimestamp) : undefined;
-          updated[key] = {
-            status,
-            reason: undefined, // 일괄 변경 시 이전 사유 자동 삭제
-            checkInTime: recCheckIn,
-          };
-          updates.push({
-            studentId: st.id,
-            session,
-            dateStr,
+          const recVal: AttendanceRecord = {
             status,
             reason: undefined,
             checkInTime: recCheckIn,
-          });
+          };
+          updated[key] = recVal;
+          changedBatch[key] = sanitizeForFirestore(recVal);
         });
-      if (userRole !== 'teacher') {
-        saveAttendanceRecords(updated);
-      }
+      saveAttendanceRecords(updated);
       return updated;
     });
 
-    if (userRole === 'admin' && updates.length > 0) {
-      sendBatchUpdateToServer(updates, userRole);
+    const monthKey = `records_${year}_${String(month).padStart(2, '0')}`;
+    try {
+      await setDoc(doc(db, 'attendance', monthKey), changedBatch, { merge: true });
+    } catch (e) {
+      console.error('Firestore 일괄 기록 실패:', e);
     }
   };
 
-  // Track keys that were filled from empty to ABSENT by day fill action, for undo/toggle capability
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // Fill all blank/NONE cells for a given day with 'X' (ABSENT), or Revert them back to NONE if already filled
-  const handleFillDayAbsent = (dateStr: string, gradeFilter?: number) => {
+  // 🔥 미체크 결석 채우기 (Firestore 실시간 전송)
+  const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const trackingKey = `${session}_${dateStr}_${gradeFilter ?? 'all'}`;
-    const serverUpdates: Array<{
-      studentId: string;
-      session: SessionType;
-      dateStr: string;
-      status: AttendanceStatus;
-      reason?: string;
-      checkInTime?: string;
-    }> = [];
+    const changedBatch: Record<string, any> = {};
 
     setRecords(prev => {
       const updated = { ...prev };
@@ -720,7 +552,6 @@ export default function App() {
         st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter)
       );
 
-      // Check which cells are currently blank/empty (NONE)
       const emptyKeys: string[] = [];
       applicableStudents.forEach(st => {
         const key = getRecordKey(st.id, session, dateStr);
@@ -730,96 +561,67 @@ export default function App() {
         }
       });
 
-      // CASE 1: If there are empty cells -> Fill them with 'ABSENT' (X) and save keys for toggle/undo
       if (emptyKeys.length > 0) {
         emptyKeys.forEach(key => {
-          updated[key] = {
+          const recVal: AttendanceRecord = {
             status: 'ABSENT',
             reason: undefined,
             checkInTime: currentTimestamp,
           };
-          const stId = key.split('_')[0];
-          serverUpdates.push({
-            studentId: stId,
-            session,
-            dateStr,
-            status: 'ABSENT',
-            reason: undefined,
-            checkInTime: currentTimestamp,
-          });
+          updated[key] = recVal;
+          changedBatch[key] = sanitizeForFirestore(recVal);
         });
         setLastFilledDayKeys(map => ({
           ...map,
           [trackingKey]: emptyKeys,
         }));
-        if (userRole !== 'teacher') saveAttendanceRecords(updated);
-        return updated;
-      }
-
-      // CASE 2: If there are NO empty cells -> Revert previously auto-filled 'ABSENT' cells back to 'NONE'
-      const previousKeys = lastFilledDayKeys[trackingKey];
-      if (previousKeys && previousKeys.length > 0) {
-        // Revert the specifically auto-filled keys
-        previousKeys.forEach(key => {
-          if (updated[key]?.status === 'ABSENT') {
-            updated[key] = {
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            };
-            const stId = key.split('_')[0];
-            serverUpdates.push({
-              studentId: stId,
-              session,
-              dateStr,
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            });
-          }
-        });
-        setLastFilledDayKeys(map => {
-          const next = { ...map };
-          delete next[trackingKey];
-          return next;
-        });
       } else {
-        // Fallback: revert all 'ABSENT' cells for this day/filter back to 'NONE'
-        applicableStudents.forEach(st => {
-          const key = getRecordKey(st.id, session, dateStr);
-          if (updated[key]?.status === 'ABSENT') {
-            updated[key] = {
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            };
-            serverUpdates.push({
-              studentId: st.id,
-              session,
-              dateStr,
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            });
-          }
-        });
-        setLastFilledDayKeys(map => {
-          const next = { ...map };
-          delete next[trackingKey];
-          return next;
-        });
+        const previousKeys = lastFilledDayKeys[trackingKey];
+        if (previousKeys && previousKeys.length > 0) {
+          previousKeys.forEach(key => {
+            if (updated[key]?.status === 'ABSENT') {
+              const recVal: AttendanceRecord = {
+                status: 'NONE',
+                reason: undefined,
+                checkInTime: undefined,
+              };
+              updated[key] = recVal;
+              changedBatch[key] = sanitizeForFirestore(recVal);
+            }
+          });
+          setLastFilledDayKeys(map => {
+            const next = { ...map };
+            delete next[trackingKey];
+            return next;
+          });
+        } else {
+          applicableStudents.forEach(st => {
+            const key = getRecordKey(st.id, session, dateStr);
+            if (updated[key]?.status === 'ABSENT') {
+              const recVal: AttendanceRecord = {
+                status: 'NONE',
+                reason: undefined,
+                checkInTime: undefined,
+              };
+              updated[key] = recVal;
+              changedBatch[key] = sanitizeForFirestore(recVal);
+            }
+          });
+        }
       }
 
-      if (userRole !== 'teacher') saveAttendanceRecords(updated);
+      saveAttendanceRecords(updated);
       return updated;
     });
 
-    if (userRole === 'admin' && serverUpdates.length > 0) {
-      sendBatchUpdateToServer(serverUpdates, userRole);
+    const monthKey = `records_${year}_${String(month).padStart(2, '0')}`;
+    try {
+      await setDoc(doc(db, 'attendance', monthKey), changedBatch, { merge: true });
+    } catch (e) {
+      console.error('Firestore 미체크 결석 채우기 실패:', e);
     }
   };
 
-  // Toggle single day in month config for current session
   const handleToggleDay = (dateStr: string) => {
     setDaysConfig(prev => ({
       ...prev,
@@ -827,7 +629,6 @@ export default function App() {
     }));
   };
 
-  // Set preset for month config for current session
   const handleSetPreset = (preset: 'standard' | 'weekdays' | 'sample8' | 'all' | 'none') => {
     if (preset === 'standard') {
       const stdDays = (month === 8 && year === 2026)
@@ -869,11 +670,8 @@ export default function App() {
     }));
   };
 
-  // 1. 특정 날짜만 비우기 (일별 초기화)
   const handleClearDate = (dateStr: string, gradeFilter?: number) => {
-    // Save snapshot before clearing for instant undo
     saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, records, students);
-
     setRecords(prev => {
       const updated = { ...prev };
       students
@@ -882,26 +680,18 @@ export default function App() {
           const key = getRecordKey(st.id, session, dateStr);
           delete updated[key];
         });
-      if (userRole !== 'teacher' && userRole !== 'teacher_mobile') saveAttendanceRecords(updated);
+      saveAttendanceRecords(updated);
       return updated;
     });
-
-    if (userRole === 'admin') {
-      sendClearAttendanceToServer('single-day', { dateStr, session, gradeFilter }, userRole);
-    }
   };
 
-  // 2. 해당 월 세션 전체 비우기 (월별 초기화)
   const handleClearMonthSession = (targetYear: number, targetMonth: number, targetSession: SessionType) => {
-    // Save snapshot before clearing for instant undo
-    const sessionName = targetSession === 'morning' ? '아침' : '저녁';
+    const sessionName = targetSession === 'morning' ? '아침' : '야간';
     saveSnapshot(`[${targetYear}년 ${targetMonth}월 ${sessionName}] 출결 비우기 전 자동 백업`, records, students);
-
     const monthPrefix = `${targetYear}-${String(targetMonth).padStart(2, '0')}`;
     setRecords(prev => {
       const updated = { ...prev };
       Object.keys(updated).forEach(key => {
-        // key format: `${studentId}_${session}_${dateStr}`
         const parts = key.split('_');
         if (parts.length >= 3) {
           const keySession = parts[1];
@@ -911,28 +701,17 @@ export default function App() {
           }
         }
       });
-      if (userRole !== 'teacher' && userRole !== 'teacher_mobile') saveAttendanceRecords(updated);
+      saveAttendanceRecords(updated);
       return updated;
     });
-
-    if (userRole === 'admin') {
-      sendClearAttendanceToServer('month-session', { year: targetYear, month: targetMonth, session: targetSession }, userRole);
-    }
   };
 
-  // 3. 전체 출결 완전 초기화 (모든 기간/세션)
   const handleClearAll = () => {
-    // Save snapshot before clearing for instant undo
     saveSnapshot('전체 출결 비우기 전 자동 백업', records, students);
-
     setRecords({});
-    if (userRole !== 'teacher' && userRole !== 'teacher_mobile') saveAttendanceRecords({});
-    if (userRole === 'admin') {
-      sendClearAttendanceToServer('all', {}, userRole);
-    }
+    saveAttendanceRecords({});
   };
 
-  // 4. 데이터 복구 적용 핸들러 (스냅샷, 서버, 백업 파일 등으로부터 복원)
   const handleRestoreData = async (restoredStudents?: Student[], restoredRecords?: Record<string, AttendanceRecord>) => {
     const finalStudents = restoredStudents && Array.isArray(restoredStudents) && restoredStudents.length > 0
       ? restoredStudents
@@ -942,23 +721,21 @@ export default function App() {
       ? restoredRecords
       : records;
 
-    // 1. Immediately apply to local state & storage
     setStudents(finalStudents);
     setRecords(finalRecords);
+    saveStudents(finalStudents);
+    saveAttendanceRecords(finalRecords);
 
-    if (userRole !== 'teacher' && userRole !== 'teacher_mobile') {
-      saveStudents(finalStudents);
-      saveAttendanceRecords(finalRecords);
-    }
-
-    // 2. Immediately send full restore to server to overwrite masterState
-    if (userRole === 'admin') {
-      await sendFullRestoreToServer(finalRecords, finalStudents, userRole);
+    const monthKey = `records_${year}_${String(month).padStart(2, '0')}`;
+    try {
+      await setDoc(doc(db, 'attendance', 'students'), { list: finalStudents });
+      await setDoc(doc(db, 'attendance', monthKey), finalRecords);
+    } catch (e) {
+      console.error('Firestore 복원 실패:', e);
     }
 
     const n = new Date();
-    const timeStr = `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
-    setLastSyncedTime(timeStr);
+    setLastSyncedTime(`${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`);
   };
 
   return (
@@ -986,7 +763,6 @@ export default function App() {
         onSync={handleSync}
       />
 
-      {/* Sync Toast Notification */}
       {syncToast && (
         <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-slate-900/95 dark:bg-slate-100/95 text-white dark:text-slate-900 text-xs sm:text-sm font-bold shadow-xl border border-slate-700 dark:border-slate-300 flex items-center gap-2 animate-bounce">
           <span className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -994,7 +770,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Container with Bento Grid spacing */}
+      {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {activeTab === 'monthly' && (
           <MonthlyGridView
@@ -1091,12 +867,11 @@ export default function App() {
         )}
       </main>
 
-      {/* Footer with School Branding & Creator Credit */}
+      {/* Footer */}
       {activeTab !== 'kiosk' && (
         <footer className="mt-auto border-t border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md py-6 transition-colors">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
-              {/* School Branding */}
               <div className="flex items-center gap-3">
                 <SchoolLogo size="sm" className="rounded-lg shadow-2xs shrink-0" />
                 <div>
@@ -1112,7 +887,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Creator Credit Badge */}
               <div className="flex flex-col sm:items-end items-center gap-1.5">
                 <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-gradient-to-r from-indigo-50 via-purple-50 to-pink-50 dark:from-indigo-950/60 dark:via-purple-950/60 dark:to-pink-950/60 border border-indigo-200/90 dark:border-indigo-800/80 shadow-2xs">
                   <span className="text-2xs font-bold text-indigo-700 dark:text-indigo-300 flex items-center gap-1">
@@ -1134,7 +908,7 @@ export default function App() {
         </footer>
       )}
 
-      {/* User Role Auth / Selector Modal */}
+      {/* Modals */}
       <RoleAuthModal
         isOpen={isRoleModalOpen}
         onClose={() => setIsRoleModalOpen(false)}
@@ -1143,7 +917,6 @@ export default function App() {
         onConfirmRole={handleRoleChange}
       />
 
-      {/* Export & Google Sheets Sync Modal */}
       <GoogleSheetsExportModal
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
@@ -1155,7 +928,6 @@ export default function App() {
         records={records}
       />
 
-      {/* Month Config Modal */}
       <MonthConfigModal
         isOpen={isMonthConfigModalOpen}
         onClose={() => setIsMonthConfigModalOpen(false)}
@@ -1178,7 +950,6 @@ export default function App() {
         onUpdateGrade3Exclusion={handleUpdateGrade3Exclusion}
       />
 
-      {/* Parent Notification Modal */}
       <ParentNotificationModal
         isOpen={parentModalData.isOpen}
         onClose={() => setParentModalData(prev => ({ ...prev, isOpen: false }))}
@@ -1187,7 +958,6 @@ export default function App() {
         absentList={parentModalData.list}
       />
 
-      {/* Clear Attendance Modal (Admin Only) */}
       <ClearAttendanceModal
         isOpen={isClearAttendanceModalOpen}
         onClose={() => setIsClearAttendanceModalOpen(false)}
@@ -1201,7 +971,6 @@ export default function App() {
         onClearAll={handleClearAll}
       />
 
-      {/* Data Recovery Modal (Admin Only) */}
       <DataRecoveryModal
         isOpen={isDataRecoveryModalOpen}
         onClose={() => setIsDataRecoveryModalOpen(false)}
