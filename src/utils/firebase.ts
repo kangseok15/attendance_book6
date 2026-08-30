@@ -13,14 +13,14 @@ import {
 } from 'firebase/firestore';
 import { Student, AttendanceRecord, AttendanceStatus, SessionType, UserRole } from '../types/attendance';
 
-// Firebase Config
+// Firebase Config (발급받으신 실제 키 적용)
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDummyKeyForFallback",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "soongshin-attendance.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "soongshin-attendance",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "soongshin-attendance.appspot.com",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "123456789",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:123456789:web:abcdef"
+  apiKey: "AIzaSyBj5SCdMoc5TRzmhYAwqxHaEGhtvOmVUrE",
+  authDomain: "attendance-book-9d28e.firebaseapp.com",
+  projectId: "attendance-book-9d28e",
+  storageBucket: "attendance-book-9d28e.firebasestorage.app",
+  messagingSenderId: "576981296217",
+  appId: "1:576981296217:web:dfcbab31e008e527be7d48"
 };
 
 // Initialize Firebase App & Firestore
@@ -67,7 +67,6 @@ export async function saveRecordToFirestore(
     const docRef = doc(db, 'attendance', monthKey);
     await setDoc(docRef, { [key]: recordData }, { merge: true });
 
-    // master_state에도 백업 기록
     const masterRef = doc(db, 'attendance', 'master_state');
     await setDoc(masterRef, { records: { [key]: recordData } }, { merge: true });
     return true;
