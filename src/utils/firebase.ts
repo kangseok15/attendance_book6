@@ -6,11 +6,12 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
   getFirestore, 
   doc, 
+  getDoc,
   setDoc, 
   onSnapshot, 
   enableIndexedDbPersistence 
 } from 'firebase/firestore';
-import { Student, AttendanceRecord } from '../types/attendance';
+import { Student, AttendanceRecord, AttendanceStatus, SessionType, UserRole } from '../types/attendance';
 
 // Firebase Config
 const firebaseConfig = {
@@ -31,15 +32,127 @@ if (typeof window !== 'undefined') {
   try {
     enableIndexedDbPersistence(db).catch((err) => {
       if (err.code === 'failed-precondition') {
-        // Multiple tabs open, persistence can only be enabled in one tab at a time.
         console.warn('[Firebase] Multiple tabs open, offline persistence disabled for secondary tab.');
       } else if (err.code === 'unimplemented') {
-        // The current browser does not support all of the features required to enable persistence
         console.warn('[Firebase] Current browser does not support offline persistence.');
       }
     });
   } catch (e) {
     // Ignore persistence errors
+  }
+}
+
+/**
+ * Firestore 단일 출결 기록 저장
+ */
+export async function saveRecordToFirestore(
+  studentId: string,
+  session: SessionType,
+  dateStr: string,
+  status: AttendanceStatus,
+  reason?: string,
+  checkInTime?: string
+) {
+  try {
+    const key = `${studentId}_${session}_${dateStr}`;
+    const dateParts = dateStr.split('-');
+    const year = dateParts[0];
+    const month = dateParts[1];
+    const monthKey = `records_${year}_${month}`;
+
+    const recordData: Record<string, any> = { status };
+    if (reason) recordData.reason = reason;
+    if (checkInTime) recordData.checkInTime = checkInTime;
+
+    const docRef = doc(db, 'attendance', monthKey);
+    await setDoc(docRef, { [key]: recordData }, { merge: true });
+
+    // master_state에도 백업 기록
+    const masterRef = doc(db, 'attendance', 'master_state');
+    await setDoc(masterRef, { records: { [key]: recordData } }, { merge: true });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveRecordToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * Firestore 일괄 출결 기록 저장
+ */
+export async function saveBatchToFirestore(
+  updates: Array<{
+    studentId: string;
+    session: SessionType;
+    dateStr: string;
+    status: AttendanceStatus;
+    reason?: string;
+    checkInTime?: string;
+  }>
+) {
+  try {
+    if (!updates || updates.length === 0) return true;
+    const batchData: Record<string, any> = {};
+
+    updates.forEach(u => {
+      const key = `${u.studentId}_${u.session}_${u.dateStr}`;
+      const rec: Record<string, any> = { status: u.status };
+      if (u.reason) rec.reason = u.reason;
+      if (u.checkInTime) rec.checkInTime = u.checkInTime;
+      batchData[key] = rec;
+    });
+
+    const sampleDate = updates[0].dateStr.split('-');
+    const monthKey = `records_${sampleDate[0]}_${sampleDate[1]}`;
+
+    const docRef = doc(db, 'attendance', monthKey);
+    await setDoc(docRef, batchData, { merge: true });
+
+    const masterRef = doc(db, 'attendance', 'master_state');
+    await setDoc(masterRef, { records: batchData }, { merge: true });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveBatchToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * Firestore 학생 명단 저장
+ */
+export async function saveStudentsToFirestore(students: Student[]) {
+  try {
+    const docRef = doc(db, 'attendance', 'students');
+    await setDoc(docRef, { list: students });
+
+    const masterRef = doc(db, 'attendance', 'master_state');
+    await setDoc(masterRef, { students }, { merge: true });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveStudentsToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * Firestore 전체 출결 상태 1회 가져오기
+ */
+export async function fetchFirestoreAttendanceState() {
+  try {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const docSnap = await getDoc(masterRef);
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      return {
+        success: true,
+        students: data.students || [],
+        records: data.records || {}
+      };
+    }
+    return { success: true, students: [], records: {} };
+  } catch (e) {
+    console.error('[Firebase] fetchFirestoreAttendanceState error:', e);
+    return { success: false, error: e };
   }
 }
 
@@ -69,7 +182,7 @@ export function subscribeToFirestoreAttendanceState(
 }
 
 /**
- * 출결 상태 직접 저장 헬퍼
+ * 출결 상태 직접 전체 저장
  */
 export async function saveFirestoreMasterState(
   records: Record<string, AttendanceRecord>,
