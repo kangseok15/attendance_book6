@@ -51,9 +51,7 @@ import { GraduationCap, Sparkles } from 'lucide-react';
 import { 
   getRecordKey, 
   isStudentExcluded, 
-  isStudentExcludedOnDate, 
   sortStudents, 
-  getBestActiveDate, 
   getTodayOrClosestActiveDate, 
   getAutoSessionByCurrentTime 
 } from './utils/attendanceHelpers';
@@ -61,19 +59,6 @@ import {
 // Firebase Firestore 직접 연동
 import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 import { db, saveRecordToFirestore, saveBatchToFirestore, saveStudentsToFirestore } from './utils/firebase';
-
-const sanitizeForFirestore = (record: AttendanceRecord): Record<string, any> => {
-  const sanitized: Record<string, any> = {
-    status: record.status
-  };
-  if (record.reason !== undefined && record.reason !== null) {
-    sanitized.reason = record.reason;
-  }
-  if (record.checkInTime !== undefined && record.checkInTime !== null) {
-    sanitized.checkInTime = record.checkInTime;
-  }
-  return sanitized;
-};
 
 export default function App() {
   const getInitialRole = (): UserRole => {
@@ -161,8 +146,14 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<ViewTab>(() => getInitialTab(getInitialRole()));
   const [session, setSession] = useState<SessionType>('morning');
-  const [year, setYear] = useState<number>(2026);
-  const [month, setMonth] = useState<number>(8);
+
+  // ✨ 접속 시 현재 실제 날짜를 기준으로 연도와 월을 자동 초기화
+  const [year, setYear] = useState<number>(() => {
+    return new Date().getFullYear();
+  });
+  const [month, setMonth] = useState<number>(() => {
+    return new Date().getMonth() + 1;
+  });
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -201,7 +192,7 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
-  // 🔥 최초 1회 실행: Firestore가 비어있을 경우 로컬 기본 데이터(학생 45명 등)를 자동 초기 업로드
+  // Firestore 마스터 자동 생성
   useEffect(() => {
     const initMasterStateIfEmpty = async () => {
       try {
@@ -224,9 +215,8 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // 🔥 Firestore 실시간 양방향 동기화 리스너
+  // Firestore 실시간 동기화 리스너
   useEffect(() => {
-    // 1. master_state 실시간 수신 (학생 + 출결 전체)
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
@@ -261,7 +251,7 @@ export default function App() {
     } else if (newRole === 'teacher_mobile') {
       setActiveTab('mobile_teacher');
       if (activeDays.length > 0) {
-        setSelectedDateStr(getTodayOrClosestActiveDate(activeDays));
+        setSelectedDateStr(getTodayOrClosestActiveDate(activeDays, year, month));
       }
     } else if (newRole === 'teacher') {
       if (activeTab === 'daily' || activeTab === 'students' || activeTab === 'kiosk' || activeTab === 'mobile_teacher') {
@@ -291,15 +281,22 @@ export default function App() {
     saveGrade3Exclusion(newConfig);
   };
 
+  // ✨ 현재 월에 맞춰 자동 날짜 세팅
   const [daysConfig, setDaysConfig] = useState<{
     morning: DayConfig[];
     night: DayConfig[];
   }>(() => {
     const initEvents = loadSchoolEvents();
     const initWed = loadIncludeWednesdaysInNight();
+    const initYear = new Date().getFullYear();
+    const initMonth = new Date().getMonth() + 1;
+
+    const morningDefault = (initMonth === 8 && initYear === 2026) ? [19, 20, 21, 24, 25, 26, 27, 28, 31] : undefined;
+    const nightDefault = (initMonth === 8 && initYear === 2026) ? [20, 21, 24, 25, 27, 28, 31] : undefined;
+
     return {
-      morning: generateMonthDays(2026, 8, 'morning', [19, 20, 21, 24, 25, 26, 27, 28, 31], initEvents, initWed),
-      night: generateMonthDays(2026, 8, 'night', [20, 21, 24, 25, 27, 28, 31], initEvents, initWed),
+      morning: generateMonthDays(initYear, initMonth, 'morning', morningDefault, initEvents, initWed),
+      night: generateMonthDays(initYear, initMonth, 'night', nightDefault, initEvents, initWed),
     };
   });
 
@@ -309,8 +306,10 @@ export default function App() {
   }, [allDaysInMonth]);
 
   const [selectedDateStr, setSelectedDateStr] = useState<string>(() => {
-    const initMorningActive = generateMonthDays(2026, 8, 'morning', [19, 20, 21, 24, 25, 26, 27, 28, 31]).filter(d => d.enabled);
-    return getTodayOrClosestActiveDate(initMorningActive, 2026, 8);
+    const initYear = new Date().getFullYear();
+    const initMonth = new Date().getMonth() + 1;
+    const initMorningActive = generateMonthDays(initYear, initMonth, 'morning').filter(d => d.enabled);
+    return getTodayOrClosestActiveDate(initMorningActive, initYear, initMonth);
   });
 
   useEffect(() => {
@@ -339,7 +338,7 @@ export default function App() {
     list: { student: Student; status: AttendanceStatus; reason?: string }[];
   }>({
     isOpen: false,
-    dateStr: '2026-08-19',
+    dateStr: '',
     list: [],
   });
 
@@ -476,7 +475,7 @@ export default function App() {
     setTimeout(() => setSyncToast(null), 3500);
   };
 
-  // 🔥 단일 출결 수정 (핸드폰/PC 즉시 Firestore 클라우드 실시간 전송)
+  // 단일 출결 수정 (Firestore 클라우드 실시간 전송)
   const handleUpdateRecord = async (
     studentId: string,
     dateStr: string,
@@ -515,11 +514,10 @@ export default function App() {
       return updated;
     });
 
-    // Firestore에 직접 저장
     await saveRecordToFirestore(studentId, session, dateStr, status, finalReason, finalCheckInTime);
   };
 
-  // 🔥 일괄 출결 처리 (Firestore 실시간 전송)
+  // 일괄 출결 처리
   const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
@@ -568,7 +566,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 미체크 결석 채우기 (Firestore 실시간 전송)
+  // 미체크 결석 채우기
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
