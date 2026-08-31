@@ -1,61 +1,76 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Student, 
-  AttendanceRecord, 
-  AttendanceStatus, 
   SessionType, 
-  UserRole 
+  DayConfig, 
+  AttendanceStatus, 
+  AttendanceRecord,
+  UserRole
 } from '../types/attendance';
 import { 
+  STATUS_META, 
+  getStatusMeta,
   getRecordKey, 
-  isStudentExcluded 
+  isStudentExcluded, 
+  isStudentExcludedOnDate,
+  getGradeOrder, 
+  sortStudents, 
+  getTodayDateStr,
+  getBestActiveDate,
+  getStudentCode5Digit,
+  getStudentAcademyDays
 } from '../utils/attendanceHelpers';
 import { 
-  Sun, 
-  Moon, 
-  Clock, 
+  announceStudentAttendance, 
+  playChimeSound, 
+  getKioskAudioMuted, 
+  setKioskAudioMuted 
+} from '../utils/kioskSound';
+import { StatusIcon } from './StatusIcon';
+import { 
   Volume2, 
   VolumeX, 
+  Clock, 
   Search, 
   Delete, 
   CheckCircle2, 
+  AlertCircle, 
   Sparkles, 
-  UserCheck, 
-  Settings2, 
-  RefreshCw, 
-  X 
+  Users, 
+  ArrowRight, 
+  RotateCcw, 
+  X, 
+  Check, 
+  Calendar,
+  Layers,
+  ChevronRight,
+  Sun,
+  Moon,
+  MessageSquare
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 
 interface KioskAttendanceViewProps {
   students: Student[];
   session: SessionType;
-  setSession: (session: SessionType) => void;
-  activeDays: Array<{ dateStr: string; dayNum: number; dayOfWeek: string; enabled: boolean }>;
+  setSession: (s: SessionType) => void;
+  activeDays: DayConfig[];
   selectedDateStr: string;
   setSelectedDateStr: (date: string) => void;
   records: Record<string, AttendanceRecord>;
-  onUpdateRecord: (
-    studentId: string,
-    dateStr: string,
-    status: AttendanceStatus,
-    reason?: string,
-    checkInTime?: string
-  ) => void;
-  userRole: UserRole;
+  onUpdateRecord: (studentId: string, dateStr: string, status: AttendanceStatus, reason?: string, checkInTime?: string) => void;
+  userRole?: UserRole;
   onExitKiosk?: () => void;
 }
 
-// 5자리 학번 문자열 생성 (예: 3학년 1반 19번 -> "30119")
-const getFullCode = (st: Student): string => {
-  const classStr = String(st.classNumber).padStart(2, '0');
-  const numStr = String(st.studentNumber).padStart(2, '0');
-  return `${st.grade}${classStr}${numStr}`;
-};
+const PRESET_REASONS = [
+  '병원 진료',
+  '학원',
+  '수행평가',
+  '가족 행사',
+  '컨디션 난조',
+  '학교 행사',
+];
 
 export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
   students,
@@ -66,45 +81,42 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
   setSelectedDateStr,
   records,
   onUpdateRecord,
-  userRole,
-  onExitKiosk
+  userRole = 'admin',
+  onExitKiosk,
 }) => {
-  // --- 화면 높이 기반 자동 비율 축소(Auto-Scale) 로직 ---
-  const containerRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState<number>(1);
-
-  useEffect(() => {
-    const handleResize = () => {
-      if (!containerRef.current || !contentRef.current) return;
-      const availableHeight = containerRef.current.clientHeight;
-      const availableWidth = containerRef.current.clientWidth;
-      const originalHeight = contentRef.current.offsetHeight;
-      const originalWidth = contentRef.current.offsetWidth;
-
-      if (originalHeight > 0 && availableHeight > 0) {
-        const scaleH = (availableHeight - 16) / originalHeight;
-        const scaleW = availableWidth / originalWidth;
-        const calculatedScale = Math.min(scaleH, scaleW, 1);
-        setScale(Math.max(calculatedScale, 0.5));
-      }
-    };
-
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    const timeoutId = setTimeout(handleResize, 200);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      clearTimeout(timeoutId);
-    };
-  }, [students, session, records]);
-
-  // --- 실시간 시계 & 테스트 모드 로직 ---
+  // 1. Live Digital Clock State (updates every second)
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
-  const [testTimeOffsetMinutes, setTestTimeOffsetMinutes] = useState<number | null>(null);
-  const [isTestModeOpen, setIsTestModeOpen] = useState<boolean>(false);
-  const [customTestTimeStr, setCustomTestTimeStr] = useState<string>('07:25');
+  const [isAudioMuted, setIsAudioMutedState] = useState<boolean>(() => getKioskAudioMuted());
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
+  // Time simulation / test mode toggle (for teacher/admin testing outside regular hours)
+  const [customTestTime, setCustomTestTime] = useState<string>(''); // e.g. "07:25" or "18:42"
+  const [isTestTimeMode, setIsTestTimeMode] = useState<boolean>(false);
+
+  // Input code state (keypad or keyboard input)
+  const [inputCode, setInputCode] = useState<string>('');
+  const [searchGrade, setSearchGrade] = useState<number | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // Confirmation / Success popup state (matches user's screenshot)
+  const [checkInResult, setCheckInResult] = useState<{
+    student: Student;
+    status: AttendanceStatus;
+    timeStr: string;
+    isLate: boolean;
+    reason?: string;
+  } | null>(null);
+
+  // Auto dismiss countdown timer (in seconds - 6초)
+  const [countdown, setCountdown] = useState<number>(6);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Reason editing inside confirmation modal
+  const [isEditingReasonInModal, setIsEditingReasonInModal] = useState<boolean>(false);
+  const [modalReasonText, setModalReasonText] = useState<string>('');
+
+  // Clock tick effect
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentTime(new Date());
@@ -112,567 +124,1150 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  const effectiveTime = useMemo(() => {
-    if (testTimeOffsetMinutes === null) return currentTime;
-    return new Date(currentTime.getTime() + testTimeOffsetMinutes * 60 * 1000);
-  }, [currentTime, testTimeOffsetMinutes]);
-
-  const currentHour = effectiveTime.getHours();
-  const currentMinute = effectiveTime.getMinutes();
-  const currentSecond = effectiveTime.getSeconds();
-  const currentTimeString = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
-
-  // 날짜 계산
-  const effectiveDateStr = useMemo(() => {
-    const y = effectiveTime.getFullYear();
-    const m = String(effectiveTime.getMonth() + 1).padStart(2, '0');
-    const d = String(effectiveTime.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }, [effectiveTime]);
-
-  const dateToUse = useMemo(() => {
-    const isActive = activeDays.some(d => d.dateStr === effectiveDateStr);
-    if (isActive) return effectiveDateStr;
-    return selectedDateStr || effectiveDateStr;
-  }, [activeDays, effectiveDateStr, selectedDateStr]);
-
-  const dayOfWeekStr = useMemo(() => {
-    const days = ['일', '월', '화', '수', '목', '금', '토'];
-    return days[effectiveTime.getDay()];
-  }, [effectiveTime]);
-
-  // 자습 판정 기준
-  const isLate = useMemo(() => {
-    const timeVal = currentHour * 60 + currentMinute;
-    if (session === 'morning') {
-      return timeVal >= 7 * 60 + 30; // 07:30 이후 지각
-    } else {
-      return timeVal >= 18 * 60 + 30; // 18:30 이후 지각
+  // Format current live time string (HH:mm)
+  const effectiveTimeStr = useMemo(() => {
+    if (isTestTimeMode && customTestTime) {
+      return customTestTime;
     }
-  }, [session, currentHour, currentMinute]);
+    const h = String(currentTime.getHours()).padStart(2, '0');
+    const m = String(currentTime.getMinutes()).padStart(2, '0');
+    return `${h}:${m}`;
+  }, [currentTime, isTestTimeMode, customTestTime]);
 
-  // 음성 안내 설정
-  const [isAudioEnabled, setIsAudioEnabled] = useState<boolean>(true);
-  const speakMessage = (text: string) => {
-    if (!isAudioEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    try {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'ko-KR';
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
-    } catch (e) {
-      console.warn('TTS error:', e);
+  const liveSecondsStr = useMemo(() => {
+    return String(currentTime.getSeconds()).padStart(2, '0');
+  }, [currentTime]);
+
+  // Current active date configuration
+  const currentDayConfig = activeDays.find(d => d.dateStr === selectedDateStr) || activeDays[0];
+  const currentDate = currentDayConfig ? currentDayConfig.dateStr : selectedDateStr;
+  const currentDayName = currentDayConfig?.dayOfWeek;
+  const currentMonth = parseInt(currentDate.split('-')[1], 10) || 8;
+  const gradeOrder = getGradeOrder(currentMonth, currentDate);
+
+  // Cutoff rule evaluation
+  // Morning: 07:30 (450 mins). After 07:30 => LATE
+  // Night: 17:30 (1050 mins). After 17:30 => LATE
+  const currentCutoffMinutes = session === 'morning' ? 7 * 60 + 30 : 17 * 60 + 30;
+  const [curH, curM] = effectiveTimeStr.split(':').map(Number);
+  const curTotalMins = (curH || 0) * 60 + (curM || 0);
+  const isCurrentlyLate = curTotalMins > currentCutoffMinutes;
+
+  // Toggle Sound
+  const handleToggleSound = () => {
+    const next = !isAudioMuted;
+    setIsAudioMutedState(next);
+    setKioskAudioMuted(next);
+    if (!next) {
+      playChimeSound('click');
     }
   };
 
-  // 키패드 입력 상태
-  const [inputCode, setInputCode] = useState<string>('');
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [gradeFilter, setGradeFilter] = useState<number | 'all'>('all');
-  const [recentCheckin, setRecentCheckin] = useState<{
-    student: Student;
-    status: AttendanceStatus;
-    timeStr: string;
-    message: string;
-  } | null>(null);
+  // Toggle Fullscreen
+  const handleToggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+      }).catch(() => {});
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().then(() => {
+          setIsFullscreen(false);
+        }).catch(() => {});
+      }
+    }
+  };
 
-  // 대상 학생 필터링
-  const applicableStudents = useMemo(() => {
-    return students.filter(st => st.active && !isStudentExcluded(st, session, dateToUse));
-  }, [students, session, dateToUse]);
+  // Candidate students who can check in on this day
+  // 키오스크에서는 아침 자율학습뿐만 아니라 야간 자율학습(야자)에서도 학원 등록 요일인 학생을 포함하여
+  // 전원(수능 후 11/17 3학년 제외)이 키오스크 명단에 뜨고 학번을 누르면 팝업이 노출되도록 처리합니다.
+  const eligibleStudents = useMemo(() => {
+    return students.filter(st => st.active && !isStudentExcludedOnDate(st.grade, currentDate));
+  }, [students, currentDate]);
 
-  const filteredStudents = useMemo(() => {
-    return applicableStudents.filter(st => {
-      if (gradeFilter !== 'all' && st.grade !== gradeFilter) return false;
-      if (!searchQuery.trim()) return true;
-      const q = searchQuery.trim().toLowerCase();
-      const code = getFullCode(st);
-      return st.name.toLowerCase().includes(q) || code.includes(q) || String(st.studentNumber).includes(q);
-    });
-  }, [applicableStudents, gradeFilter, searchQuery]);
+  // Sort eligible students
+  const sortedEligibleStudents = useMemo(() => {
+    return sortStudents(eligibleStudents, gradeOrder, false);
+  }, [eligibleStudents, gradeOrder]);
 
-  // 출결 현황 통계
+  // Quick statistics for today's session
   const stats = useMemo(() => {
     let present = 0;
     let late = 0;
     let absent = 0;
-    let early = 0;
-    let official = 0;
     let unchecked = 0;
+    const recentList: { student: Student; record: AttendanceRecord }[] = [];
 
-    applicableStudents.forEach(st => {
-      const key = getRecordKey(st.id, session, dateToUse);
+    eligibleStudents.forEach(st => {
+      const key = getRecordKey(st.id, session, currentDate);
       const rec = records[key];
-      if (!rec || rec.status === 'NONE') unchecked++;
-      else if (rec.status === 'PRESENT') present++;
-      else if (rec.status === 'LATE') late++;
-      else if (rec.status === 'ABSENT') absent++;
-      else if (rec.status === 'EARLY_LEAVE') early++;
-      else if (rec.status === 'OFFICIAL_ABSENT') official++;
+      const status = rec?.status || 'NONE';
+
+      if (status === 'PRESENT') present++;
+      else if (status === 'LATE') late++;
+      else if (status === 'ABSENT') absent++;
+      else unchecked++;
+
+      if (rec && status !== 'NONE' && rec.checkInTime) {
+        recentList.push({ student: st, record: rec });
+      }
     });
 
+    // Sort recent list in reverse chronological order
+    recentList.sort((a, b) => (b.record.checkInTime || '').localeCompare(a.record.checkInTime || ''));
+
     return {
-      total: applicableStudents.length,
+      total: eligibleStudents.length,
       present,
       late,
       absent,
-      early,
-      official,
-      unchecked
+      unchecked,
+      checkedTotal: present + late,
+      recentList: recentList.slice(0, 10),
     };
-  }, [applicableStudents, records, session, dateToUse]);
+  }, [eligibleStudents, records, session, currentDate]);
 
-  // 입실 처리 실행 함수
-  const handleCheckin = (student: Student) => {
-    const key = getRecordKey(student.id, session, dateToUse);
+  // Helper to match student by 학번 code or query
+  // Supports:
+  // - 5 digits: 30119 (3학년 1반 19번), 20407 (2학년 4반 7번)
+  // - 4 digits: 3119 (3학년 1반 19번)
+  // - 3 digits: 216 (2학년 1반 6번), 113 (1학년 1반 3번)
+  // - Name: 최서윤
+  const findStudentByCode = useCallback((code: string): Student | null => {
+    const clean = code.trim().replace(/[-\s]/g, '');
+    if (!clean) return null;
+
+    // 1. Direct name match
+    const nameMatch = eligibleStudents.find(s => s.name === clean || s.name.toLowerCase() === clean.toLowerCase());
+    if (nameMatch) return nameMatch;
+
+    // 2. Numeric Student Code Match
+    if (/^\d+$/.test(clean)) {
+      // 2.1 Standard 5-digit code: Grade(1) + Class(2) + StudentNum(2) -> e.g. 30119 = 3-1-19, 20407 = 2-4-7
+      if (clean.length === 5) {
+        const g = parseInt(clean[0], 10);
+        const c = parseInt(clean.slice(1, 3), 10);
+        const num = parseInt(clean.slice(3), 10);
+        const match = eligibleStudents.find(s => s.grade === g && s.classNum === c && s.studentNum === num);
+        if (match) return match;
+      }
+
+      // 2.2 Standard 4-digit code: Grade(1) + Class(1) + StudentNum(2) -> e.g. 3119 = 3-1-19, 2106 = 2-1-6
+      if (clean.length === 4) {
+        const g = parseInt(clean[0], 10);
+        const c = parseInt(clean[1], 10);
+        const num = parseInt(clean.slice(2), 10);
+        const match = eligibleStudents.find(s => s.grade === g && s.classNum === c && s.studentNum === num);
+        if (match) return match;
+      }
+
+      // 2.3 3-digit code: Grade(1) + Class(1) + StudentNum(1) -> e.g. 216 = 2-1-6, 113 = 1-1-3
+      if (clean.length === 3) {
+        const g = parseInt(clean[0], 10);
+        const c = parseInt(clean[1], 10);
+        const num = parseInt(clean[2], 10);
+        const match = eligibleStudents.find(s => s.grade === g && s.classNum === c && s.studentNum === num);
+        if (match) return match;
+      }
+
+      // 2.4 Phone last 4 digits match
+      if (clean.length === 4) {
+        const phoneMatch = eligibleStudents.find(s => s.phone?.replace(/[-\s]/g, '').endsWith(clean));
+        if (phoneMatch) return phoneMatch;
+      }
+    }
+
+    return null;
+  }, [eligibleStudents]);
+
+  // Live matching candidate as the student types digits into keypad
+  const liveMatchedStudent = useMemo(() => {
+    if (!inputCode.trim()) return null;
+    return findStudentByCode(inputCode);
+  }, [inputCode, findStudentByCode]);
+
+  // Core Check-In Action
+  const handleCheckInStudent = (student: Student) => {
+    // Determine automatic status based on exact session cutoff rule:
+    // Morning: > 07:30 => LATE, <= 07:30 => PRESENT
+    // Night: > 17:30 => LATE, <= 17:30 => PRESENT
+    const checkInTime = effectiveTimeStr;
+    const [h, m] = checkInTime.split(':').map(Number);
+    const totalMinutes = (h || 0) * 60 + (m || 0);
+
+    const isLate = session === 'morning' ? totalMinutes > 7 * 60 + 30 : totalMinutes > 17 * 60 + 30;
+    const newStatus: AttendanceStatus = isLate ? 'LATE' : 'PRESENT';
+
+    // Existing record key
+    const key = getRecordKey(student.id, session, currentDate);
     const existingRec = records[key];
 
-    if (existingRec && existingRec.status !== 'NONE') {
-      const statusText = existingRec.status === 'PRESENT' ? '출석' : existingRec.status === 'LATE' ? '지각' : '입실';
-      const msg = `${student.name} 학생은 이미 ${statusText} 처리되었습니다.`;
-      setRecentCheckin({
-        student,
-        status: existingRec.status,
-        timeStr: existingRec.checkInTime || currentTimeString,
-        message: msg
-      });
-      speakMessage(`${student.name} 학생, 이미 확인되었습니다.`);
-      setInputCode('');
-      return;
-    }
+    // Update attendance record
+    onUpdateRecord(student.id, currentDate, newStatus, existingRec?.reason, checkInTime);
 
-    const determinedStatus: AttendanceStatus = isLate ? 'LATE' : 'PRESENT';
-    onUpdateRecord(student.id, dateToUse, determinedStatus, undefined, currentTimeString);
+    // Audio TTS Announcement & chime
+    announceStudentAttendance(student.name, isLate, checkInTime);
 
-    const msg = isLate 
-      ? `${student.name} 학생, 지각 입실 처리되었습니다 (${currentTimeString})`
-      : `${student.name} 학생, 정상 출석 확인되었습니다 (${currentTimeString})`;
-
-    setRecentCheckin({
+    // Show Confirmation Card
+    setCheckInResult({
       student,
-      status: determinedStatus,
-      timeStr: currentTimeString,
-      message: msg
+      status: newStatus,
+      timeStr: checkInTime,
+      isLate,
+      reason: existingRec?.reason,
     });
 
-    speakMessage(isLate ? `${student.name}, 지각입니다.` : `${student.name} 학생, 출석 완료.`);
+    // Reset input keypad code
     setInputCode('');
+    setIsEditingReasonInModal(false);
+    setModalReasonText(existingRec?.reason || '');
+
+    // Start 6-second auto dismiss countdown (2초 연장)
+    setCountdown(6);
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+    }
+    countdownIntervalRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          setCheckInResult(null);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
-  // 키패드 번호 입력으로 제출
-  const handleCodeSubmit = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!inputCode.trim()) return;
+  // Close Confirmation Popup immediately
+  const handleDismissModal = () => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+    }
+    setCheckInResult(null);
+  };
 
-    const trimmed = inputCode.trim();
-    const found = applicableStudents.find(st => {
-      const fullCode = getFullCode(st);
-      return fullCode === trimmed || String(st.studentNumber) === trimmed || `${st.grade}${st.classNumber}${String(st.studentNumber).padStart(2, '0')}` === trimmed;
-    });
+  // Allow manual status change from inside the confirmation card if needed (clears previous reason)
+  const handleModalStatusChange = (newStatus: AttendanceStatus) => {
+    if (!checkInResult) return;
+    const isLate = newStatus === 'LATE';
+    // 상태를 변경할 경우 이전 사유도 함께 초기화
+    onUpdateRecord(checkInResult.student.id, currentDate, newStatus, undefined, checkInResult.timeStr);
+    
+    setCheckInResult(prev => prev ? {
+      ...prev,
+      status: newStatus,
+      isLate,
+      reason: undefined,
+    } : null);
+    setModalReasonText('');
 
-    if (found) {
-      handleCheckin(found);
+    playChimeSound('click');
+  };
+
+  // Start editing reason (pause countdown timer)
+  const handleStartEditingReason = () => {
+    setModalReasonText(checkInResult?.reason || '');
+    setIsEditingReasonInModal(true);
+    // 사유 작성 중에는 시간이 정지되도록 타이머를 즉시 중단합니다.
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+  };
+
+  // Real-time reason update (auto-saves instantly without needing a save button)
+  const handleReasonChange = (newText: string) => {
+    setModalReasonText(newText);
+    if (checkInResult) {
+      const trimmed = newText.trim();
+      onUpdateRecord(checkInResult.student.id, currentDate, checkInResult.status, trimmed, checkInResult.timeStr);
+      setCheckInResult(prev => prev ? { ...prev, reason: trimmed } : null);
+    }
+  };
+
+  // Preset reason chip click (instantly appends/sets and auto-saves)
+  const handleAddPresetReason = (preset: string) => {
+    if (!checkInResult) return;
+    const current = modalReasonText.trim();
+    let next = '';
+    if (!current) {
+      next = preset;
+    } else if (current.includes(preset)) {
+      next = current;
     } else {
-      speakMessage('일치하는 학생 번호를 찾을 수 없습니다.');
-      alert(`[${trimmed}] 번호의 미래인재반 학생을 찾을 수 없습니다.`);
-      setInputCode('');
+      next = `${current}, ${preset}`;
     }
+    setModalReasonText(next);
+    onUpdateRecord(checkInResult.student.id, currentDate, checkInResult.status, next, checkInResult.timeStr);
+    setCheckInResult(prev => prev ? { ...prev, reason: next } : null);
+    playChimeSound('click');
   };
 
+  // Keypad button clicks
   const handleKeypadPress = (val: string) => {
-    if (inputCode.length < 5) {
-      setInputCode(prev => prev + val);
+    playChimeSound('click');
+    if (val === 'CLEAR') {
+      setInputCode('');
+    } else if (val === 'BACK') {
+      setInputCode(prev => prev.slice(0, -1));
+    } else if (val === 'ENTER') {
+      if (liveMatchedStudent) {
+        handleCheckInStudent(liveMatchedStudent);
+      } else {
+        const found = findStudentByCode(inputCode);
+        if (found) {
+          handleCheckInStudent(found);
+        } else {
+          playChimeSound('error');
+        }
+      }
+    } else {
+      if (inputCode.length < 5) {
+        const nextCode = inputCode + val;
+        setInputCode(nextCode);
+
+        // Auto-trigger if 5-digit exact match (e.g. 30119)
+        const autoMatch = findStudentByCode(nextCode);
+        if (autoMatch && nextCode.length === 5) {
+          setTimeout(() => {
+            handleCheckInStudent(autoMatch);
+          }, 200);
+        }
+      }
     }
   };
 
-  const handleKeypadBackspace = () => {
-    setInputCode(prev => prev.slice(0, -1));
-  };
+  // Physical keyboard support
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // If modal is open and editing reason, don't hijack keyboard
+      if (isEditingReasonInModal) return;
+
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        handleKeypadPress(e.key);
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleKeypadPress('BACK');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleDismissModal();
+        setInputCode('');
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (checkInResult) {
+          handleDismissModal();
+        } else {
+          handleKeypadPress('ENTER');
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inputCode, liveMatchedStudent, checkInResult, isEditingReasonInModal, handleKeypadPress]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    };
+  }, []);
+
+  // Filter student directory for fast touch
+  const filteredTouchStudents = useMemo(() => {
+    return sortedEligibleStudents.filter(st => {
+      if (searchGrade !== 'all' && st.grade !== searchGrade) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const code5 = getStudentCode5Digit(st);
+        const code4 = `${st.grade}${st.classNum}${String(st.studentNum).padStart(2, '0')}`;
+        return st.name.toLowerCase().includes(q) || code5.includes(q) || code4.includes(q);
+      }
+      return true;
+    });
+  }, [sortedEligibleStudents, searchGrade, searchQuery]);
 
   return (
-    <div 
-      ref={containerRef} 
-      className="w-full h-[calc(100vh-140px)] min-h-[600px] flex items-center justify-center overflow-hidden"
-    >
-      <div 
-        ref={contentRef}
-        style={{
-          transform: `scale(${scale})`,
-          transformOrigin: 'top center',
-          transition: 'transform 0.15s ease-out'
-        }}
-        className="w-full max-w-7xl mx-auto space-y-3.5 pb-2"
-      >
-        {/* 상단 헤더 섹션 */}
-        <div className="bg-slate-900 dark:bg-slate-900 text-white rounded-3xl p-5 sm:p-6 shadow-2xl border border-slate-800 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-indigo-500/20 to-purple-600/10 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none" />
+    <div id="kiosk-attendance-container" className="space-y-4 max-w-7xl mx-auto pb-10">
+      
+      {/* Top Kiosk Control & Digital Clock Bar */}
+      <div className="bg-slate-900 text-white rounded-3xl p-5 sm:p-6 shadow-2xl border border-slate-800 relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
 
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-5 relative z-10">
-            {/* 좌측 안내 문구 */}
-            <div className="text-center lg:text-left space-y-1.5">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-950/80 border border-indigo-700/60 text-indigo-300 text-xs font-bold">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                <span>교실 앞 입실 키오스크</span>
-                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
-                <span className="text-2xs text-indigo-200">
-                  {session === 'morning' ? '☀️ 아침 자율학습 (07:30 기준)' : '🌙 야간 자율학습 (18:30 기준)'}
-                </span>
-              </div>
-              <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center justify-center lg:justify-start gap-2">
-                <span>숭신고 미래인재반 자습 입실 체크</span>
-              </h1>
-              <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3 text-xs text-slate-300">
-                <span>출결 판정 기준:</span>
-                <span className="font-semibold text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40">
-                  {session === 'morning' ? '☀️ 07:30 이전 [출석 ○] · 07:30 이후 [지각 △]' : '🌙 18:30 이전 [출석 ○] · 18:30 이후 [지각 △]'}
-                </span>
-                <span className={`px-2 py-0.5 rounded font-bold border ${isLate ? 'bg-rose-950/60 border-rose-700 text-rose-300' : 'bg-emerald-950/60 border-emerald-700 text-emerald-300'}`}>
-                  {isLate ? '현재 시각: 지각 대상 시간' : '현재 시각: 정상 출석 시간'}
-                </span>
-                <button
-                  onClick={() => setIsAudioEnabled(!isAudioEnabled)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-bold transition-colors ${
-                    isAudioEnabled ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700' : 'bg-slate-800 text-slate-400 border border-slate-700'
-                  }`}
-                >
-                  {isAudioEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-                  <span>{isAudioEnabled ? '음성 켬' : '음성 끔'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* 우측 초대형 시계 & 날짜 */}
-            <div className="flex flex-col items-center lg:items-end bg-slate-950/80 px-6 py-3.5 rounded-2xl border border-slate-800 shadow-inner">
-              <div className="text-xs sm:text-sm font-semibold text-indigo-300 tracking-wider flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-indigo-400" />
-                <span>{effectiveDateStr} ({dayOfWeekStr}요일)</span>
-              </div>
-              <div className="text-3xl sm:text-4xl lg:text-5xl font-black font-mono tracking-tight text-white drop-shadow-md flex items-baseline gap-1">
-                <span>{currentTimeString}</span>
-                <span className="text-xl sm:text-2xl text-indigo-400 font-semibold">:{String(currentSecond).padStart(2, '0')}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* 중앙 요약 뱃지 4개 */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-4 pt-4 border-t border-slate-800/80">
-            <div className="bg-slate-800/60 rounded-xl p-2.5 text-center border border-slate-700/50">
-              <div className="text-2xs sm:text-xs text-slate-400 font-bold">자습 대상 총원</div>
-              <div className="text-lg sm:text-xl font-black text-white">{stats.total}명</div>
-            </div>
-            <div className="bg-emerald-950/40 rounded-xl p-2.5 text-center border border-emerald-800/40">
-              <div className="text-2xs sm:text-xs text-emerald-400 font-bold">정상 출석 (○)</div>
-              <div className="text-lg sm:text-xl font-black text-emerald-400">{stats.present}명</div>
-            </div>
-            <div className="bg-amber-950/40 rounded-xl p-2.5 text-center border border-amber-800/40">
-              <div className="text-2xs sm:text-xs text-amber-400 font-bold">지각 입실 (△)</div>
-              <div className="text-lg sm:text-xl font-black text-amber-400">{stats.late}명</div>
-            </div>
-            <div className="bg-rose-950/40 rounded-xl p-2.5 text-center border border-rose-800/40">
-              <div className="text-2xs sm:text-xs text-rose-400 font-bold">미체크 인원</div>
-              <div className="text-lg sm:text-xl font-black text-rose-400">{stats.unchecked}명</div>
-            </div>
-          </div>
-        </div>
-
-        {/* 2단 메인 인터페이스 (좌: 키패드, 우: 간편 터치 명단) */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 relative z-10">
           
-          {/* 좌측: 학번 5자리 키패드 입력 */}
-          <div className="lg:col-span-5 bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-xl border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                  <UserCheck className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                  본인 학번 입력 (5자리)
-                </span>
-                <span className="text-2xs font-semibold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">
-                  예: 3학년 1반 19번 ➔ 30119
-                </span>
-              </div>
-
-              {/* 입력 디스플레이 */}
-              <div className="relative mb-3.5">
-                <input
-                  type="text"
-                  value={inputCode}
-                  onChange={e => setInputCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') handleCodeSubmit();
-                  }}
-                  placeholder="학번(5자리) 또는 이름 터치"
-                  className="w-full text-center text-xl sm:text-2xl font-black tracking-widest py-3 px-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border-2 border-indigo-500/80 focus:outline-hidden focus:ring-4 focus:ring-indigo-500/20 text-slate-900 dark:text-white placeholder:text-slate-400 placeholder:text-base placeholder:font-normal transition-all"
-                  autoFocus
-                />
-              </div>
-
-              {/* 터치 키패드 (1~9, 0, 지우기, 확인) */}
-              <div className="grid grid-cols-3 gap-2">
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+          {/* Left: Branding & Session Status */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="px-3 py-1 bg-indigo-500/20 border border-indigo-400/30 rounded-full text-indigo-300 font-bold text-xs flex items-center gap-1.5 shadow-inner">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+                교실 앞 입실 키오스크
+              </span>
+              
+              {/* Session Switcher Pill */}
+              {userRole === 'student' ? (
+                <div className="inline-flex p-1 rounded-xl bg-slate-800/90 border border-slate-700 shadow-inner">
+                  {session === 'morning' ? (
+                    <div className="px-3 py-1 rounded-lg text-xs font-black flex items-center gap-1.5 bg-amber-500 text-slate-950 shadow-md">
+                      <Sun className="w-3.5 h-3.5" />
+                      <span>아침 자율학습 (07:30 기준)</span>
+                    </div>
+                  ) : (
+                    <div className="px-3 py-1 rounded-lg text-xs font-black flex items-center gap-1.5 bg-indigo-500 text-white shadow-md">
+                      <Moon className="w-3.5 h-3.5" />
+                      <span>야간 자율학습 (17:30 기준)</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="inline-flex p-0.5 rounded-xl bg-slate-800 border border-slate-700">
                   <button
-                    key={num}
                     type="button"
-                    onClick={() => handleKeypadPress(String(num))}
-                    className="h-11 sm:h-12 text-lg sm:text-xl font-black rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 active:scale-95 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 transition-all shadow-2xs flex items-center justify-center cursor-pointer select-none"
+                    onClick={() => setSession('morning')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      session === 'morning'
+                        ? 'bg-amber-500 text-slate-950 shadow-md font-black'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
                   >
-                    {num}
+                    <Sun className="w-3.5 h-3.5" />
+                    아침 자율학습 (07:30 기준)
                   </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={handleKeypadBackspace}
-                  className="h-11 sm:h-12 rounded-xl bg-slate-200 dark:bg-slate-800/80 hover:bg-rose-100 dark:hover:bg-rose-950/50 active:scale-95 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 transition-all shadow-2xs flex items-center justify-center cursor-pointer select-none"
-                >
-                  <Delete className="w-5 h-5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleKeypadPress('0')}
-                  className="h-11 sm:h-12 text-lg sm:text-xl font-black rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 active:scale-95 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 transition-all shadow-2xs flex items-center justify-center cursor-pointer select-none"
-                >
-                  0
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleCodeSubmit()}
-                  className="h-11 sm:h-12 text-sm sm:text-base font-black rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 active:scale-95 text-white shadow-md shadow-indigo-600/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer select-none"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>입실</span>
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => setSession('night')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      session === 'night'
+                        ? 'bg-indigo-500 text-white shadow-md font-black'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Moon className="w-3.5 h-3.5" />
+                    야간 자율학습 (17:30 기준)
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* 키패드 하단 부가 안내 & 시간 테스트 모달 트리거 */}
-            <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-2xs text-slate-400">
-              <span>* 키보드 숫자 키 또는 화면 번호 터치</span>
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+                숭신고 미래인재반 자습 입실 체크
+              </h1>
+            </div>
+
+            {/* Rule Notice Pill & Speaker Toggle */}
+            <div className="flex items-center gap-2 flex-wrap text-xs text-slate-300">
+              <span className="font-semibold text-slate-400">출결 판정 기준:</span>
+              {session === 'morning' ? (
+                <span className="px-2.5 py-0.5 rounded-md bg-amber-950/60 border border-amber-800/80 text-amber-300 font-bold">
+                  ☀️ 07:30 이전 [출석 ○] · 07:30 이후 [지각 △]
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-md bg-indigo-950/60 border border-indigo-800/80 text-indigo-300 font-bold">
+                  🌙 17:30 이전 [출석 ○] · 17:30 이후 [지각 △]
+                </span>
+              )}
+              
+              <span className={`px-2.5 py-0.5 rounded-md font-bold text-2xs border ${
+                isCurrentlyLate
+                  ? 'bg-rose-950/70 border-rose-800 text-rose-300 animate-pulse'
+                  : 'bg-emerald-950/70 border-emerald-800 text-emerald-300'
+              }`}>
+                현재 시각: {isCurrentlyLate ? '지각 대상 시간' : '정상 출석 시간'}
+              </span>
+
+              {/* Speaker Toggle button directly next to late status indicator */}
               <button
-                onClick={() => setIsTestModeOpen(true)}
-                className="text-slate-400 hover:text-indigo-500 inline-flex items-center gap-1 font-medium transition-colors"
+                type="button"
+                onClick={handleToggleSound}
+                className={`px-2.5 py-0.5 rounded-md border transition-all flex items-center gap-1.5 text-2xs font-bold cursor-pointer ${
+                  isAudioMuted
+                    ? 'bg-slate-800/90 border-slate-700 text-slate-400 hover:text-slate-200'
+                    : 'bg-emerald-800/90 border-emerald-600 text-emerald-100 shadow-xs hover:bg-emerald-700'
+                }`}
+                title={isAudioMuted ? '음성 안내 켜기' : '음성 안내 끄기'}
               >
-                <Settings2 className="w-3 h-3" />
-                <span>시간 테스트</span>
+                {isAudioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-300" />}
+                <span>{isAudioMuted ? '음성 끔' : '음성 켬'}</span>
               </button>
             </div>
           </div>
 
-          {/* 우측: 학생 간편 터치 명단 & 최근 입실 피드 */}
-          <div className="lg:col-span-7 space-y-3">
+          {/* Right: Giant Digital Clock */}
+          <div className="flex items-center gap-4 w-full lg:w-auto justify-between lg:justify-end">
             
-            {/* 학생 카드 목록 (터치 즉시 입실) */}
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-4 sm:p-5 shadow-xl border border-slate-200 dark:border-slate-800">
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 mb-3">
-                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                  학생 간편 터치 입실 (이름 터치 시 즉시 출결 완료)
-                </span>
-
-                {/* 학년 필터 & 검색 */}
-                <div className="flex items-center gap-2 w-full sm:w-auto">
-                  <div className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 border border-slate-200 dark:border-slate-700 text-2xs font-bold">
-                    {(['all', 3, 2, 1] as const).map(g => (
-                      <button
-                        key={g}
-                        onClick={() => setGradeFilter(g)}
-                        className={`px-2 py-0.5 rounded-md transition-all ${
-                          gradeFilter === g 
-                            ? 'bg-indigo-600 text-white shadow-2xs' 
-                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                        }`}
-                      >
-                        {g === 'all' ? `전체 (${applicableStudents.length})` : `${g}학년`}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="relative flex-1 sm:w-36">
-                    <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={e => setSearchQuery(e.target.value)}
-                      placeholder="이름/학번 검색..."
-                      className="w-full text-2xs pl-6 pr-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-hidden focus:ring-1 focus:ring-indigo-500 text-slate-900 dark:text-white"
-                    />
-                  </div>
-                </div>
+            {/* Live Clock Display */}
+            <div className="bg-slate-950/90 border border-slate-700/90 rounded-2xl px-6 py-3.5 text-right shadow-inner min-w-[200px] sm:min-w-[250px]">
+              <div className="text-sm sm:text-base font-bold text-indigo-300 flex items-center justify-end gap-1.5 tracking-tight">
+                <Calendar className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span>{currentDayConfig ? `${currentDayConfig.dateStr} (${currentDayConfig.dayOfWeek}요일)` : currentDate}</span>
               </div>
-
-              {/* 학생 버튼 그리드 */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-[220px] overflow-y-auto pr-1">
-                {filteredStudents.map(st => {
-                  const key = getRecordKey(st.id, session, dateToUse);
-                  const rec = records[key];
-                  const fullCode = getFullCode(st);
-                  const isChecked = rec && rec.status !== 'NONE';
-
-                  let statusBadge = (
-                    <span className="text-3xs px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 border border-slate-200 dark:border-slate-700">
-                      미체크
-                    </span>
-                  );
-                  let cardBg = 'bg-white dark:bg-slate-950/60 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:border-indigo-400 hover:shadow-md';
-
-                  if (rec?.status === 'PRESENT') {
-                    statusBadge = (
-                      <span className="text-3xs px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 font-bold">
-                        ○ 출석 ({rec.checkInTime || '완료'})
-                      </span>
-                    );
-                    cardBg = 'bg-emerald-50/60 dark:bg-emerald-950/20 border-emerald-300 dark:border-emerald-800/80 text-emerald-900 dark:text-emerald-200 shadow-2xs';
-                  } else if (rec?.status === 'LATE') {
-                    statusBadge = (
-                      <span className="text-3xs px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-800 font-bold">
-                        △ 지각 ({rec.checkInTime || '완료'})
-                      </span>
-                    );
-                    cardBg = 'bg-amber-50/60 dark:bg-amber-950/20 border-amber-300 dark:border-amber-800/80 text-amber-900 dark:text-amber-200 shadow-2xs';
-                  }
-
-                  return (
-                    <button
-                      key={st.id}
-                      type="button"
-                      onClick={() => handleCheckin(st)}
-                      className={`flex flex-col items-center justify-center p-2 rounded-2xl border transition-all active:scale-95 cursor-pointer ${cardBg}`}
-                    >
-                      <div className="flex items-center justify-between w-full mb-1">
-                        <span className={`text-2xs font-mono font-bold ${isChecked ? 'opacity-80' : 'text-indigo-600 dark:text-indigo-400'}`}>
-                          {fullCode}
-                        </span>
-                        {statusBadge}
-                      </div>
-                      <div className="text-sm font-black tracking-tight">{st.name}</div>
-                    </button>
-                  );
-                })}
+              <div className="text-4xl sm:text-5xl lg:text-6xl font-black font-mono tracking-tight text-white flex items-baseline justify-end gap-1.5 mt-0.5">
+                <span>{effectiveTimeStr}</span>
+                <span className="text-sm sm:text-base text-indigo-400 font-mono font-bold">:{liveSecondsStr}</span>
               </div>
             </div>
 
-            {/* 실시간 알림 피드 */}
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-3.5 shadow-xl border border-slate-200 dark:border-slate-800">
-              <div className="text-2xs font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between mb-1.5">
-                <span className="flex items-center gap-1.5">
-                  <Clock className="w-3 h-3 text-indigo-500" />
-                  실시간 최근 입실 기록
-                </span>
-                <span className="text-3xs font-mono text-slate-400">자동 갱신 중</span>
-              </div>
+          </div>
 
-              {recentCheckin ? (
-                <div className="flex items-center justify-between p-2.5 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/80 animate-fade-in">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                    <span className="text-xs font-black text-slate-900 dark:text-white">
-                      {recentCheckin.student.name} ({getFullCode(recentCheckin.student)})
-                    </span>
-                    <span className="text-2xs text-slate-600 dark:text-slate-300">
-                      {recentCheckin.message}
-                    </span>
-                  </div>
-                  <span className="text-2xs font-mono font-bold text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded-md border border-indigo-200 dark:border-indigo-800">
-                    {recentCheckin.timeStr}
-                  </span>
-                </div>
-              ) : (
-                <div className="text-center py-2 text-2xs text-slate-400 dark:text-slate-500 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  아직 입실한 학생이 없습니다. 번호를 입력하거나 이름을 터치하세요.
-                </div>
-              )}
-            </div>
+        </div>
 
+        {/* Live Attendance Counter Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5 pt-5 border-t border-slate-800 text-center">
+          <div className="bg-slate-800/60 rounded-xl p-2.5 border border-slate-700/60">
+            <div className="text-2xs text-slate-400 font-semibold">자습 대상 총원</div>
+            <div className="text-xl sm:text-2xl font-black text-white font-mono">{stats.total}명</div>
+          </div>
+          <div className="bg-emerald-950/40 rounded-xl p-2.5 border border-emerald-800/40">
+            <div className="text-2xs text-emerald-300 font-semibold">정상 출석 (○)</div>
+            <div className="text-xl sm:text-2xl font-black text-emerald-400 font-mono">{stats.present}명</div>
+          </div>
+          <div className="bg-amber-950/40 rounded-xl p-2.5 border border-amber-800/40">
+            <div className="text-2xs text-amber-300 font-semibold">지각 입실 (△)</div>
+            <div className="text-xl sm:text-2xl font-black text-amber-400 font-mono">{stats.late}명</div>
+          </div>
+          <div className="bg-slate-800/60 rounded-xl p-2.5 border border-slate-700/60">
+            <div className="text-2xs text-slate-400 font-semibold">미체크 인원</div>
+            <div className="text-xl sm:text-2xl font-black text-rose-400 font-mono">{stats.unchecked}명</div>
           </div>
         </div>
 
-        {/* 시간 테스트 모달 */}
-        {isTestModeOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-fade-in">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-sm w-full p-5 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2.5">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                  <Settings2 className="w-4 h-4 text-indigo-500" />
-                  키오스크 시간 가상 테스트
-                </h3>
-                <button
-                  onClick={() => setIsTestModeOpen(false)}
-                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+      </div>
 
-              <p className="text-2xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                출석/지각 판정을 미리 검증해볼 수 있는 테스트 도구입니다. 원하는 시각을 설정해보세요.
-              </p>
+      {/* Main Kiosk Area: Keypad Input (Left) & Touch Roster / Recent Log (Right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        {/* Left 5 Cols: Large Touch Number Pad for Student ID */}
+        <div className="lg:col-span-5 bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between space-y-4">
+          
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <label htmlFor="kiosk-input-code" className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Users className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                본인 학번 입력 (5자리)
+              </label>
+              <span className="text-3xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 px-2 py-0.5 rounded-full font-bold">
+                예: 3학년 1반 19번 ➔ 30119
+              </span>
+            </div>
 
-              <div className="space-y-2">
-                <label className="text-2xs font-bold text-slate-700 dark:text-slate-300">
-                  가상 테스트 시각 설정 (HH:mm)
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="time"
-                    value={customTestTimeStr}
-                    onChange={e => setCustomTestTimeStr(e.target.value)}
-                    className="flex-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-xs font-mono font-bold"
-                  />
-                  <button
-                    onClick={() => {
-                      const [h, m] = customTestTimeStr.split(':').map(Number);
-                      const targetTotalMin = h * 60 + m;
-                      const realTotalMin = currentTime.getHours() * 60 + currentTime.getMinutes();
-                      setTestTimeOffsetMinutes(targetTotalMin - realTotalMin);
-                      setIsTestModeOpen(false);
-                    }}
-                    className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-500 transition-colors"
-                  >
-                    적용
-                  </button>
+            {/* Input Display Box */}
+            <div className="relative mb-4">
+              <div className="w-full h-16 bg-slate-100 dark:bg-slate-950 rounded-2xl border-2 border-indigo-500/50 dark:border-indigo-400/50 px-4 flex items-center justify-between shadow-inner">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl sm:text-3xl font-black font-mono tracking-widest text-slate-900 dark:text-white">
+                    {inputCode ? (
+                      inputCode.split('').map((char, i) => (
+                        <span key={i} className="inline-block px-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg mx-0.5 text-indigo-600 dark:text-indigo-300">
+                          {char}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-slate-400 dark:text-slate-600 text-lg sm:text-xl font-normal font-sans">
+                        학번(5자리) 또는 이름 터치
+                      </span>
+                    )}
+                  </span>
                 </div>
+
+                {inputCode && (
+                  <button
+                    type="button"
+                    onClick={() => handleKeypadPress('CLEAR')}
+                    className="p-2 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                    title="전체 지우기"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                )}
               </div>
 
-              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                <button
-                  onClick={() => {
-                    const [h, m] = [7, 25];
-                    const realTotalMin = currentTime.getHours() * 60 + currentTime.getMinutes();
-                    setTestTimeOffsetMinutes(h * 60 + m - realTotalMin);
-                    setIsTestModeOpen(false);
-                  }}
-                  className="py-1.5 px-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-2xs font-bold hover:bg-emerald-100"
-                >
-                  ☀️ 아침 정상 (07:25)
-                </button>
-                <button
-                  onClick={() => {
-                    const [h, m] = [7, 35];
-                    const realTotalMin = currentTime.getHours() * 60 + currentTime.getMinutes();
-                    setTestTimeOffsetMinutes(h * 60 + m - realTotalMin);
-                    setIsTestModeOpen(false);
-                  }}
-                  className="py-1.5 px-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-2xs font-bold hover:bg-rose-100"
-                >
-                  ☀️ 아침 지각 (07:35)
-                </button>
-              </div>
+              {/* Live Preview Card if a student matches during typing */}
+              <AnimatePresence>
+                {liveMatchedStudent && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="mt-2 p-3 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 rounded-2xl flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold px-2 py-0.5 bg-indigo-600 text-white rounded-lg">
+                        {liveMatchedStudent.grade}학년 {liveMatchedStudent.classNum}반 {liveMatchedStudent.studentNum}번 ({getStudentCode5Digit(liveMatchedStudent)})
+                      </span>
+                      <span className="text-base font-black text-slate-900 dark:text-white">
+                        {liveMatchedStudent.name}
+                      </span>
+                    </div>
 
-              {testTimeOffsetMinutes !== null && (
-                <button
-                  onClick={() => {
-                    setTestTimeOffsetMinutes(null);
-                    setIsTestModeOpen(false);
-                  }}
-                  className="w-full py-1.5 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-2xs font-bold hover:bg-slate-300 flex items-center justify-center gap-1"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>실제 현재 시각으로 초기화</span>
-                </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCheckInStudent(liveMatchedStudent)}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md flex items-center gap-1 cursor-pointer animate-pulse"
+                    >
+                      <span>입실 체크</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* 10-Key Keypad Matrix */}
+            <div className="grid grid-cols-3 gap-2.5">
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9', 'BACK', '0', 'ENTER'].map(keyVal => {
+                if (keyVal === 'BACK') {
+                  return (
+                    <button
+                      key={keyVal}
+                      type="button"
+                      onClick={() => handleKeypadPress('BACK')}
+                      className="h-14 sm:h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 active:scale-95 text-slate-700 dark:text-slate-200 font-bold text-base sm:text-lg flex items-center justify-center transition-all shadow-xs cursor-pointer border border-slate-200/60 dark:border-slate-700/60"
+                      title="한 글자 지우기"
+                    >
+                      <Delete className="w-6 h-6" />
+                    </button>
+                  );
+                }
+
+                if (keyVal === 'ENTER') {
+                  return (
+                    <button
+                      key={keyVal}
+                      type="button"
+                      onClick={() => handleKeypadPress('ENTER')}
+                      className="h-14 sm:h-16 rounded-2xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-black text-base sm:text-lg flex items-center justify-center gap-1.5 transition-all shadow-lg shadow-indigo-200 dark:shadow-indigo-950 cursor-pointer"
+                      title="입실 체크 완료"
+                    >
+                      <Check className="w-6 h-6" />
+                      <span>입실</span>
+                    </button>
+                  );
+                }
+
+                return (
+                  <button
+                    key={keyVal}
+                    type="button"
+                    onClick={() => handleKeypadPress(keyVal)}
+                    className="h-14 sm:h-16 rounded-2xl bg-slate-50 dark:bg-slate-800/90 hover:bg-indigo-50 dark:hover:bg-slate-700 active:scale-95 text-slate-900 dark:text-white font-black text-2xl font-mono flex items-center justify-center transition-all shadow-xs cursor-pointer border border-slate-200 dark:border-slate-700"
+                  >
+                    {keyVal}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Quick Help & Testing Toggle */}
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 text-2xs text-slate-500 dark:text-slate-400 flex items-center justify-between">
+            <span>* 키보드 숫자 키 또는 화면 번호 터치</span>
+
+            {/* Test Time Simulator for Admin */}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setIsTestTimeMode(!isTestTimeMode)}
+                className="text-3xs text-indigo-600 dark:text-indigo-400 hover:underline font-semibold"
+              >
+                {isTestTimeMode ? '실시간 복귀' : '⚙️ 시간 테스트'}
+              </button>
+              {isTestTimeMode && (
+                <input
+                  type="time"
+                  value={customTestTime || '07:25'}
+                  onChange={e => setCustomTestTime(e.target.value)}
+                  className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-xs border border-indigo-400 text-slate-900 dark:text-white"
+                />
               )}
             </div>
           </div>
-        )}
+
+        </div>
+
+        {/* Right 7 Cols: Quick Student Touch Grid + Live Recent Check-in Feed */}
+        <div className="lg:col-span-7 space-y-4">
+          
+          {/* Student Direct Touch Selection Roster */}
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+            
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                  학생 간편 터치 입실
+                </span>
+                <span className="text-2xs font-semibold text-slate-400">
+                  (이름 터치 시 즉시 출결 완료)
+                </span>
+              </div>
+
+              {/* Grade Tabs & Search */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="inline-flex p-0.5 bg-slate-100 dark:bg-slate-800 rounded-xl text-xs font-bold border border-slate-200 dark:border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => setSearchGrade('all')}
+                    className={`px-2.5 py-1 rounded-lg transition-all ${
+                      searchGrade === 'all'
+                        ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-xs'
+                        : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    전체 ({eligibleStudents.length})
+                  </button>
+                  {gradeOrder.map(g => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => setSearchGrade(g)}
+                      className={`px-2.5 py-1 rounded-lg transition-all ${
+                        searchGrade === g
+                          ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-xs'
+                          : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      {g}학년
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="이름/학번 검색..."
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    className="pl-7 pr-2.5 py-1 text-xs rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-hidden w-28 sm:w-36"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Students Touch Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 max-h-80 overflow-y-auto pr-1">
+              {filteredTouchStudents.map(student => {
+                const key = getRecordKey(student.id, session, currentDate);
+                const rec = records[key];
+                const curStatus = rec?.status || 'NONE';
+                const isChecked = curStatus !== 'NONE';
+                const statusMeta = getStatusMeta(curStatus);
+
+                const gradeBadge = student.grade === 3 
+                  ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
+                  : student.grade === 2
+                  ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                  : 'bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800';
+
+                return (
+                  <button
+                    key={student.id}
+                    type="button"
+                    onClick={() => handleCheckInStudent(student)}
+                    className={`p-3 rounded-2xl border text-left transition-all relative flex flex-col justify-between group active:scale-95 cursor-pointer ${
+                      isChecked
+                        ? 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                        : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:border-indigo-500 hover:shadow-md'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full mb-1.5">
+                      <span className={`text-3xs px-1.5 py-0.5 rounded-md font-bold font-mono border ${gradeBadge}`}>
+                        {getStudentCode5Digit(student)}
+                      </span>
+
+                      {isChecked ? (
+                        <span className={`text-3xs px-1.5 py-0.5 rounded-full font-bold flex items-center gap-0.5 ${statusMeta.badgeClass}`}>
+                          <StatusIcon status={curStatus} size="xs" />
+                          <span>{statusMeta.label}</span>
+                        </span>
+                      ) : (
+                        <span className="text-3xs text-slate-400 font-medium">
+                          미체크
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-sm font-black text-slate-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400">
+                        {student.name}
+                      </span>
+                      {rec?.checkInTime && isChecked && (
+                        <span className="text-3xs font-mono font-bold text-slate-500 dark:text-slate-400">
+                          {rec.checkInTime}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+          </div>
+
+          {/* Real-time Recent Check-in Feed */}
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-5 border border-slate-200 dark:border-slate-800 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                실시간 최근 입실 기록 ({stats.recentList.length}건)
+              </div>
+              <span className="text-3xs text-slate-400">자동 갱신 중</span>
+            </div>
+
+            {stats.recentList.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-400 font-medium bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
+                아직 입실한 학생이 없습니다. 번호를 입력하거나 이름을 터치하세요.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {stats.recentList.slice(0, 6).map(({ student, record }) => {
+                  const statusMeta = getStatusMeta(record.status);
+                  return (
+                    <div
+                      key={student.id}
+                      className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
+                          {student.grade}학년 {student.classNum}반
+                        </span>
+                        <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          {student.name}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-3xs font-mono text-slate-500 dark:text-slate-400">
+                          {record.checkInTime}
+                        </span>
+                        <span className={`text-3xs px-2 py-0.5 rounded-full font-bold ${statusMeta.badgeClass}`}>
+                          {statusMeta.label}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+        </div>
+
       </div>
+
+      {/* Confirmation Modal: Exactly matching the user's uploaded screenshot card layout */}
+      <AnimatePresence>
+        {checkInResult && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/70 backdrop-blur-xs">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 350 }}
+              className="bg-white dark:bg-slate-900 rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border-2 border-indigo-500 dark:border-indigo-400 relative overflow-hidden"
+            >
+              {/* Progress Countdown Bar at the top */}
+              <div className="absolute top-0 left-0 right-0 h-2 bg-slate-100 dark:bg-slate-800">
+                <motion.div
+                  className="h-full bg-indigo-600"
+                  initial={{ width: '100%' }}
+                  animate={{ width: '0%' }}
+                  transition={{ duration: 4, ease: 'linear' }}
+                />
+              </div>
+
+              {/* Close Button */}
+              <button
+                type="button"
+                onClick={handleDismissModal}
+                className="absolute top-5 right-5 p-2 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-6 h-6" />
+              </button>
+
+              <div className="space-y-5 pt-2">
+                
+                {/* 1. Header Badges: [3학년 1반 19번 (학번 30119)]  [출석완료 / 지각 / 조퇴 등] */}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Blue outlined badge with 5-digit code */}
+                    <span className="text-sm sm:text-base font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-50/90 dark:bg-indigo-950/70 border border-indigo-200 dark:border-indigo-800 px-3.5 py-1.5 rounded-xl">
+                      {checkInResult.student.grade}학년 {checkInResult.student.classNum}반 {checkInResult.student.studentNum}번 ({getStudentCode5Digit(checkInResult.student)})
+                    </span>
+                  </div>
+
+                  {/* Status Indicator Badge */}
+                  {(() => {
+                    const curMeta = getStatusMeta(checkInResult.status);
+                    let statusText = curMeta.label;
+                    if (checkInResult.status === 'PRESENT') statusText = '출석 완료';
+                    else if (checkInResult.status === 'LATE') statusText = '지각 입실';
+                    else if (checkInResult.status === 'EARLY_LEAVE') statusText = '조퇴';
+                    else if (checkInResult.status === 'EXCUSED') statusText = '인정';
+                    else if (checkInResult.status === 'ABSENT') statusText = '결석';
+
+                    return (
+                      <span className={`text-sm sm:text-base font-extrabold px-4 py-1.5 rounded-full border flex items-center gap-1.5 ${curMeta.badgeClass}`}>
+                        <StatusIcon status={checkInResult.status} size="sm" />
+                        <span>{statusText}</span>
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                {/* 2. Middle Row: Student Name & Parent Phone Badge */}
+                <div className="flex items-center justify-between py-1">
+                  <div className="flex items-baseline gap-4 flex-wrap">
+                    <h2 className="text-3xl sm:text-4xl font-black text-slate-900 dark:text-white tracking-tight">
+                      {checkInResult.student.name}
+                    </h2>
+                    <span className="text-sm sm:text-base font-mono font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-3 py-1 rounded-xl">
+                      🕒 {checkInResult.timeStr}
+                    </span>
+                  </div>
+
+                  {checkInResult.student.parentPhone && (
+                    <span className="text-sm sm:text-base font-mono font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50/90 dark:bg-indigo-950/70 border border-indigo-200 dark:border-indigo-800 px-3.5 py-1.5 rounded-xl">
+                      학부모 {checkInResult.student.parentPhone.slice(-4)}
+                    </span>
+                  )}
+                </div>
+
+                {/* 2.5 학원 가는 요일 안내 배너 (잘 보이도록 강조 표시) */}
+                {(() => {
+                  const rawAcademyDays = getStudentAcademyDays(checkInResult.student, currentDate);
+                  const weekdayOrder = ['월', '화', '수', '목', '금'];
+                  const sortedAcademyDays = rawAcademyDays
+                    .slice()
+                    .sort((a, b) => weekdayOrder.indexOf(a) - weekdayOrder.indexOf(b));
+
+                  const hasAcademyDays = sortedAcademyDays.length > 0;
+                  const isTodayAcademyDay = session === 'night' && currentDayName && sortedAcademyDays.includes(currentDayName);
+
+                  return (
+                    <div className="my-1 px-4 py-3 rounded-2xl bg-slate-50 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3 shadow-2xs">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm sm:text-base font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                          <Calendar className="w-5 h-5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                          <span>{currentMonth}월 학원 가는 요일 :</span>
+                        </span>
+                        {hasAcademyDays ? (
+                          <span className="text-sm sm:text-base font-black text-amber-800 dark:text-amber-200 bg-amber-100 dark:bg-amber-950/70 border border-amber-300/90 dark:border-amber-700/80 px-3 py-1 rounded-xl tracking-wide">
+                            {sortedAcademyDays.map(d => (d.endsWith('요일') ? d : `${d}요일`)).join(', ')}
+                          </span>
+                        ) : (
+                          <span className="text-xs sm:text-sm font-semibold text-slate-500 dark:text-slate-400 bg-slate-200/70 dark:bg-slate-700/70 px-2.5 py-1 rounded-lg">
+                            없음 (매일 참여)
+                          </span>
+                        )}
+                      </div>
+
+                      {isTodayAcademyDay && (
+                        <span className="shrink-0 text-xs sm:text-sm font-black text-rose-700 dark:text-rose-300 bg-rose-100 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800 px-3 py-1 rounded-xl">
+                          오늘 학원일 (야자 미참여)
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* 3. Status Action Buttons Row: [○ 출석] [△ 지각] [⊘ 조퇴] [공 공결/인정] [X 결석] (07:31/17:31 이후는 출석 버튼 숨김) */}
+                {(() => {
+                  const allStatuses: AttendanceStatus[] = ['PRESENT', 'LATE', 'EARLY_LEAVE', 'EXCUSED', 'ABSENT'];
+                  const visibleStatuses = allStatuses.filter(st => {
+                    // 아침 07:31 이후, 야간 17:31 이후에는 출석 체크 란 숨김 (지각/조퇴/공결/결석만 표시)
+                    if (isCurrentlyLate && st === 'PRESENT') return false;
+                    return true;
+                  });
+
+                  return (
+                    <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                      {isCurrentlyLate && (
+                        <div className="text-xs text-amber-600 dark:text-amber-400 font-bold px-1 flex items-center gap-1.5">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>
+                            {session === 'morning' 
+                              ? '07:30 이후 입실: 규정에 따라 지각으로 자동 처리됩니다 (출석 불가)' 
+                              : '17:30 이후 입실: 규정에 따라 지각으로 자동 처리됩니다 (출석 불가)'}
+                          </span>
+                        </div>
+                      )}
+                      <div className={`grid ${visibleStatuses.length === 4 ? 'grid-cols-4' : 'grid-cols-5'} gap-2.5`}>
+                        {visibleStatuses.map(st => {
+                          const m = STATUS_META[st];
+                          const isSelected = checkInResult.status === st;
+
+                          const statusColors: Record<AttendanceStatus, { unselected: string; selected: string }> = {
+                            PRESENT: {
+                              unselected: 'border-emerald-300/80 dark:border-emerald-800/80 bg-emerald-50/80 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100/80',
+                              selected: 'bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-400 shadow-md',
+                            },
+                            LATE: {
+                              unselected: 'border-amber-300/80 dark:border-amber-800/80 bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100/80',
+                              selected: 'bg-amber-500 text-white border-amber-500 ring-2 ring-amber-400 shadow-md',
+                            },
+                            EARLY_LEAVE: {
+                              unselected: 'border-purple-300/80 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/30 text-purple-800 dark:text-purple-300 hover:bg-purple-100/80',
+                              selected: 'bg-purple-600 text-white border-purple-600 ring-2 ring-purple-400 shadow-md',
+                            },
+                            EXCUSED: {
+                              unselected: 'border-blue-300/80 dark:border-blue-800/80 bg-blue-50/80 dark:bg-blue-950/30 text-blue-800 dark:text-blue-300 hover:bg-blue-100/80',
+                              selected: 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-400 shadow-md',
+                            },
+                            ABSENT: {
+                              unselected: 'border-rose-300/80 dark:border-rose-800/80 bg-rose-50/80 dark:bg-rose-950/30 text-rose-800 dark:text-rose-300 hover:bg-rose-100/80',
+                              selected: 'bg-rose-600 text-white border-rose-600 ring-2 ring-rose-400 shadow-md',
+                            },
+                            NONE: {
+                              unselected: 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
+                              selected: 'bg-slate-700 text-white border-slate-700 ring-2 ring-slate-400 shadow-md',
+                            },
+                          };
+
+                          const style = statusColors[st];
+
+                          return (
+                            <button
+                              key={st}
+                              type="button"
+                              onClick={() => handleModalStatusChange(st)}
+                              className={`py-3.5 px-2 rounded-2xl text-sm font-extrabold transition-all flex flex-col items-center justify-center border cursor-pointer ${
+                                isSelected
+                                  ? `${style.selected} scale-[1.03]`
+                                  : style.unselected
+                              }`}
+                            >
+                              <span className="flex items-center justify-center text-xl leading-none font-bold h-6">
+                                <StatusIcon status={st} size="md" />
+                              </span>
+                              <span className="text-xs mt-1.5 font-bold">{m.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* 4. Reason / Notes section: 사유 없음 or + 사유입력 */}
+                <div className="pt-2">
+                  {isEditingReasonInModal ? (
+                    <div className="space-y-3 p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800/60 shadow-inner">
+                      <div className="flex items-center justify-between text-xs sm:text-sm font-bold text-indigo-700 dark:text-indigo-300">
+                        <div className="flex items-center gap-2">
+                          <MessageSquare className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                          <span>사유 및 특이사항 입력</span>
+                        </div>
+                        <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" />
+                          <span>실시간 자동 저장</span>
+                        </span>
+                      </div>
+
+                      <div className="relative flex items-center">
+                        <input
+                          type="text"
+                          value={modalReasonText}
+                          onChange={e => handleReasonChange(e.target.value)}
+                          placeholder="사유를 입력하거나 아래 버튼을 누르면 즉시 자동 기록됩니다"
+                          className="w-full pl-3.5 pr-9 py-3 text-sm rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 shadow-inner font-medium"
+                          autoFocus
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleDismissModal();
+                            }
+                          }}
+                        />
+                        {modalReasonText && (
+                          <button
+                            type="button"
+                            onClick={() => handleReasonChange('')}
+                            className="absolute right-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1.5 cursor-pointer"
+                            title="사유 지우기"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Preset Reason Quick Buttons */}
+                      <div className="space-y-1.5 pt-1">
+                        <div className="text-xs text-slate-500 dark:text-slate-400 font-medium flex items-center justify-between">
+                          <span>빠른 사유 선택 (클릭 시 즉시 기록):</span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {PRESET_REASONS.map(preset => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => handleAddPresetReason(preset)}
+                              className="px-3 py-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 hover:text-indigo-700 dark:hover:text-indigo-300 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 text-xs sm:text-sm font-semibold transition-all text-center flex items-center justify-center gap-1 cursor-pointer shadow-2xs active:scale-95"
+                              title={`클릭하여 사유에 '${preset}' 즉시 반영`}
+                            >
+                              <span>+ {preset}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between text-xs sm:text-sm text-slate-500 dark:text-slate-400 px-1 py-1">
+                      <span>
+                        {checkInResult.reason ? (
+                          <span className="text-indigo-600 dark:text-indigo-400 font-semibold flex items-center gap-1.5">
+                            <MessageSquare className="w-4 h-4 inline shrink-0" />
+                            사유: {checkInResult.reason}
+                          </span>
+                        ) : (
+                          <span>사유 없음</span>
+                        )}
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={handleStartEditingReason}
+                        className="text-indigo-600 dark:text-indigo-400 hover:underline font-bold text-xs sm:text-sm cursor-pointer flex items-center gap-1.5"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        <span>{checkInResult.reason ? '사유 수정' : '+ 사유입력'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* 5. Bottom Action: Next Student / Dismiss button with countdown */}
+                <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                  <div className="text-xs text-slate-400 font-medium">
+                    {isEditingReasonInModal ? (
+                      <span className="text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 animate-pulse" />
+                        사유 작성 중 (자동 닫힘 정지됨)
+                      </span>
+                    ) : (
+                      <span>{countdown}초 후 자동으로 닫힙니다 (또는 Enter)</span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleDismissModal}
+                    className="px-6 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs sm:text-sm shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
+                  >
+                    <CheckCircle2 className="w-5 h-5" />
+                    <span>확인 / 다음 학생 입실</span>
+                  </button>
+                </div>
+
+              </div>
+
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
     </div>
   );
 };
