@@ -13,8 +13,7 @@ import {
 } from '../types/attendance';
 import { 
   getRecordKey, 
-  isStudentExcluded, 
-  getStudentFullCode 
+  isStudentExcluded 
 } from '../utils/attendanceHelpers';
 import { 
   Sun, 
@@ -25,15 +24,11 @@ import {
   Search, 
   Delete, 
   CheckCircle2, 
-  AlertTriangle, 
   Sparkles, 
-  GraduationCap, 
   UserCheck, 
   Settings2, 
   RefreshCw, 
-  X,
-  ChevronUp,
-  ChevronDown
+  X 
 } from 'lucide-react';
 
 interface KioskAttendanceViewProps {
@@ -54,6 +49,13 @@ interface KioskAttendanceViewProps {
   userRole: UserRole;
   onExitKiosk?: () => void;
 }
+
+// 5자리 학번 문자열 생성 (예: 3학년 1반 19번 -> "30119")
+const getFullCode = (st: Student): string => {
+  const classStr = String(st.classNumber).padStart(2, '0');
+  const numStr = String(st.studentNumber).padStart(2, '0');
+  return `${st.grade}${classStr}${numStr}`;
+};
 
 export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
   students,
@@ -81,11 +83,10 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
       const originalWidth = contentRef.current.offsetWidth;
 
       if (originalHeight > 0 && availableHeight > 0) {
-        // 여유 공간을 남겨두고 축소 비율 계산 (최대 1.0)
         const scaleH = (availableHeight - 16) / originalHeight;
         const scaleW = availableWidth / originalWidth;
         const calculatedScale = Math.min(scaleH, scaleW, 1);
-        setScale(Math.max(calculatedScale, 0.5)); // 최소 50%까지 유연하게 축소
+        setScale(Math.max(calculatedScale, 0.5));
       }
     };
 
@@ -98,7 +99,7 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
     };
   }, [students, session, records]);
 
-  // --- 기존 실시간 시계 & 테스트 모드 로직 ---
+  // --- 실시간 시계 & 테스트 모드 로직 ---
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [testTimeOffsetMinutes, setTestTimeOffsetMinutes] = useState<number | null>(null);
   const [isTestModeOpen, setIsTestModeOpen] = useState<boolean>(false);
@@ -120,7 +121,6 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
   const currentMinute = effectiveTime.getMinutes();
   const currentSecond = effectiveTime.getSeconds();
   const currentTimeString = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
-  const currentTimeWithSeconds = `${currentTimeString}:${String(currentSecond).padStart(2, '0')}`;
 
   // 날짜 계산
   const effectiveDateStr = useMemo(() => {
@@ -188,7 +188,7 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
       if (gradeFilter !== 'all' && st.grade !== gradeFilter) return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.trim().toLowerCase();
-      const code = getStudentFullCode(st);
+      const code = getFullCode(st);
       return st.name.toLowerCase().includes(q) || code.includes(q) || String(st.studentNumber).includes(q);
     });
   }, [applicableStudents, gradeFilter, searchQuery]);
@@ -268,7 +268,7 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
 
     const trimmed = inputCode.trim();
     const found = applicableStudents.find(st => {
-      const fullCode = getStudentFullCode(st);
+      const fullCode = getFullCode(st);
       return fullCode === trimmed || String(st.studentNumber) === trimmed || `${st.grade}${st.classNumber}${String(st.studentNumber).padStart(2, '0')}` === trimmed;
     });
 
@@ -289,10 +289,6 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
 
   const handleKeypadBackspace = () => {
     setInputCode(prev => prev.slice(0, -1));
-  };
-
-  const handleKeypadClear = () => {
-    setInputCode('');
   };
 
   return (
@@ -508,7 +504,7 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
                 {filteredStudents.map(st => {
                   const key = getRecordKey(st.id, session, dateToUse);
                   const rec = records[key];
-                  const fullCode = getStudentFullCode(st);
+                  const fullCode = getFullCode(st);
                   const isChecked = rec && rec.status !== 'NONE';
 
                   let statusBadge = (
@@ -569,7 +565,7 @@ export const KioskAttendanceView: React.FC<KioskAttendanceViewProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
                     <span className="text-xs font-black text-slate-900 dark:text-white">
-                      {recentCheckin.student.name} ({getStudentFullCode(recentCheckin.student)})
+                      {recentCheckin.student.name} ({getFullCode(recentCheckin.student)})
                     </span>
                     <span className="text-2xs text-slate-600 dark:text-slate-300">
                       {recentCheckin.message}
