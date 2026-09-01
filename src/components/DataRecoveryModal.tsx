@@ -8,7 +8,6 @@ import { Student, AttendanceRecord, UserRole } from '../types/attendance';
 import { initialStudents } from '../data/initialData';
 import { 
   loadSnapshots, 
-  restoreSnapshot, 
   deleteSnapshot, 
   clearAllSnapshots, 
   SnapshotItem, 
@@ -20,7 +19,7 @@ import {
   saveFullRestoreToFirestore 
 } from '../utils/firebase';
 import { db } from '../utils/firebase';
-import { collection, getDocs, query, orderBy, limit, deleteDoc, doc } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
 import { 
   X, 
   RotateCcw, 
@@ -101,7 +100,6 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
       setScheduledBackups(list);
     } catch (e) {
       console.warn('Failed to load scheduled backups from Firestore:', e);
-      // 로컬 스냅샷 중 scheduled 타입 필터링 폴백
       const local = loadSnapshots().filter(s => s.reason.includes('정기 자동') || s.reason.includes('자동 저장'));
       setScheduledBackups(local.map(l => ({
         id: l.id,
@@ -153,7 +151,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
     }, 4000);
   };
 
-  // 🔥 Firestore 클라우드 즉시 백업 저장
+  // Firestore 클라우드 즉시 백업 저장
   const handleTriggerScheduledBackup = async () => {
     setIsProcessing(true);
     try {
@@ -167,9 +165,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
         createdAt: Date.now()
       };
 
-      // 1. 클라우드 백업 컬렉션 저장
       await saveBackupToFirestore(name, payload);
-      // 2. 로컬 스냅샷에도 저장
       saveSnapshot(name, records, students);
 
       await loadScheduledBackups();
@@ -183,7 +179,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
     }
   };
 
-  // 🔥 자동저장 백업 복구 실행
+  // 자동저장 백업 복구 실행
   const handleRestoreScheduled = async (backupItem: any) => {
     if (!backupItem || !backupItem.payload) return;
     const confirmMsg = `[${backupItem.name || backupItem.createdAt}] 시점의 백업으로 복구하시겠습니까?\n\n- 학생 수: ${backupItem.studentsCount || 0}명\n- 출결 기록: ${backupItem.recordsCount || 0}건\n\n※ 현재 상태는 스냅샷으로 자동 안전 보관됩니다.`;
@@ -216,16 +212,14 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
     setIsProcessing(true);
     try {
       saveSnapshot(`스냅샷 복구 전 자동 백업 (${snapshot.reason})`, records, students);
-      const restored = restoreSnapshot(snapshot.id);
-      if (restored) {
-        onRestoreData(restored.students, restored.records);
-        await saveFullRestoreToFirestore(restored.records, restored.students);
-        setSnapshots(loadSnapshots());
-        showFeedback('success', '선택한 스냅샷 데이터로 성공적으로 복구되었습니다.');
-        setSelectedSnapshot(null);
-      } else {
-        showFeedback('error', '스냅샷을 불러오지 못했습니다.');
-      }
+      const restoredStudents = snapshot.students || students;
+      const restoredRecords = snapshot.records || {};
+
+      onRestoreData(restoredStudents, restoredRecords);
+      await saveFullRestoreToFirestore(restoredRecords, restoredStudents);
+      setSnapshots(loadSnapshots());
+      showFeedback('success', '선택한 스냅샷 데이터로 성공적으로 복구되었습니다.');
+      setSelectedSnapshot(null);
     } catch (e: any) {
       showFeedback('error', '스냅샷 복구 중 오류가 발생했습니다.');
     } finally {
@@ -488,7 +482,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     지금 즉시 서버 자동 저장 실행
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    스케줄 시간 외에도 지금 상태를 서버 자동저장 백업 파일로 즉시 생성합니다.
+                    스케줄 시간 외에도 지금 상태를 서버 자동저장 백업 파일로 즉시 생성합니다[cite: 1].
                   </p>
                 </div>
                 <button
@@ -515,10 +509,10 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                 <div className="text-center py-12 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl">
                   <Clock className="w-10 h-10 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
                   <p className="text-xs font-bold text-slate-500 dark:text-slate-400">
-                    보관된 정기 자동저장 백업이 없습니다.
+                    보관된 정기 자동저장 백업이 없습니다[cite: 1].
                   </p>
                   <p className="text-3xs text-slate-400 dark:text-slate-500 mt-1">
-                    위의 '즉시 자동저장' 버튼을 누르거나 08:20 / 18:00 시점에 자동으로 기록됩니다.
+                    위의 '즉시 자동저장' 버튼을 누르거나 08:20 / 18:00 시점에 자동으로 기록됩니다[cite: 1].
                   </p>
                 </div>
               ) : (
@@ -572,7 +566,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     작업 직전 자동 백업 스냅샷 목록
                   </h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    출결 비우기, 데이터 복구, 명단 수정 등 주요 작업 전 자동으로 저장된 최근 기록입니다.
+                    출결 비우기, 데이터 복구, 명단 수정 등 주요 작업 전 자동으로 저장된 최근 기록입니다[cite: 1].
                   </p>
                 </div>
                 {snapshots.length > 0 && (
@@ -590,7 +584,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                 <div className="text-center py-12 border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl">
                   <Clock className="w-10 h-10 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
                   <p className="text-xs font-bold text-slate-500 dark:text-slate-400">
-                    저장된 스냅샷이 없습니다.
+                    저장된 스냅샷이 없습니다[cite: 1].
                   </p>
                 </div>
               ) : (
@@ -657,7 +651,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     Firestore 클라우드 & 서버 마스터 데이터 복구
                   </div>
                   <p className="text-xs text-teal-800 dark:text-teal-300 mt-1 leading-relaxed">
-                    다중 키오스크 태블릿이나 기기 간 불일치가 발생했을 때, Firestore 클라우드 및 서버 마스터 DB의 최신 출결 데이터를 즉시 가져와 화면과 로컬 스토리지를 완벽하게 일치시킵니다.
+                    다중 키오스크 태블릿이나 기기 간 불일치가 발생했을 때, Firestore 클라우드 및 서버 마스터 DB의 최신 출결 데이터를 즉시 가져와 화면과 로컬 스토리지를 완벽하게 일치시킵니다[cite: 1].
                   </p>
                 </div>
               </div>
@@ -718,7 +712,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     JSON 독립 파일 백업 및 복원
                   </div>
                   <p className="text-xs text-purple-800 dark:text-purple-300 mt-1 leading-relaxed">
-                    현재 등록된 전체 학생 명단과 전체 출결 기록, 자동 스냅샷을 표준 JSON 파일로 다운로드하여 내 컴퓨터에 안전하게 보관하거나 다른 PC에 그대로 불러올 수 있습니다.
+                    현재 등록된 전체 학생 명단과 전체 출결 기록, 자동 스냅샷을 표준 JSON 파일로 다운로드하여 내 컴퓨터에 안전하게 보관하거나 다른 PC에 그대로 불러올 수 있습니다[cite: 1].
                   </p>
                 </div>
               </div>
@@ -731,7 +725,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                       <span>파일로 내보내기 (백업)</span>
                     </h4>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                      현재 상태의 학생 {students.length}명, 출결 {Object.keys(records).length}건을 JSON 파일로 저장합니다.
+                      현재 상태의 학생 {students.length}명, 출결 {Object.keys(records).length}건을 JSON 파일로 저장합니다[cite: 1].
                     </p>
                   </div>
                   <button
@@ -751,7 +745,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                       <span>파일에서 불러오기 (복원)</span>
                     </h4>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                      이전에 저장한 JSON 백업 파일을 선택하여 데이터를 완전히 복구합니다.
+                      이전에 저장한 JSON 백업 파일을 선택하여 데이터를 완전히 복구합니다[cite: 1].
                     </p>
                   </div>
                   <label className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-1.5 cursor-pointer text-center">
@@ -780,7 +774,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     초기 기본 명단 복원 (45명)
                   </div>
                   <p className="text-xs text-amber-800 dark:text-amber-300 mt-1 leading-relaxed">
-                    학생 명단 데이터가 꼬이거나 손상되었을 때, 숭신고 미래인재반 기본 45명 명단으로 안전하게 되돌립니다. 기존 출결 기록은 보존됩니다.
+                    학생 명단 데이터가 꼬이거나 손상되었을 때, 숭신고 미래인재반 기본 45명 명단으로 안전하게 되돌립니다. 기존 출결 기록은 보존됩니다[cite: 1].
                   </p>
                 </div>
               </div>
@@ -791,7 +785,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     기본 학생 45명 명단으로 재설정
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    현재 등록 학생: {students.length}명 ➔ 기본 45명
+                    현재 등록 학생: {students.length}명 ➔ 기본 45명[cite: 1]
                   </p>
                 </div>
                 <button
@@ -812,7 +806,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
         {/* Footer */}
         <div className="px-6 py-3.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/80 flex items-center justify-between text-xs text-slate-500">
           <div className="flex items-center gap-1 font-bold text-slate-400">
-            <span>※ 모든 복구 실행 시, 현재 상태는 자동 스냅샷으로 안전하게 사전 백업됩니다.</span>
+            <span>※ 모든 복구 실행 시, 현재 상태는 자동 스냅샷으로 안전하게 사전 백업됩니다[cite: 1].</span>
           </div>
           <button
             type="button"
