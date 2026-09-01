@@ -83,7 +83,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
     currentCheckInTime?: string;
   } | null>(null);
 
-  const sessionLabel = session === 'morning' ? '아자' : '야자';
+  const sessionLabel = session === 'morning' ? '아침' : '야';
 
   const showTeacherWarning = () => {
     setRoleWarning('담임 교사 모드는 조회 전용입니다. 출결 입력 및 수정은 불가합니다.');
@@ -379,7 +379,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                   }`}
                 >
                   <Sun className="w-3.5 h-3.5" />
-                  <span>아자</span>
+                  <span>아침</span>
                 </button>
                 <button
                   type="button"
@@ -391,7 +391,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                   }`}
                 >
                   <Moon className="w-3.5 h-3.5" />
-                  <span>야자</span>
+                  <span>야간</span>
                 </button>
               </div>
             )}
