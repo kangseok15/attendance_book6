@@ -83,7 +83,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
     currentCheckInTime?: string;
   } | null>(null);
 
-  const sessionLabel = session === 'morning' ? '아침' : '야';
+  const sessionLabel = session === 'morning' ? '아침' : '야간';
 
   const showTeacherWarning = () => {
     setRoleWarning('담임 교사 모드는 조회 전용입니다. 출결 입력 및 수정은 불가합니다.');
