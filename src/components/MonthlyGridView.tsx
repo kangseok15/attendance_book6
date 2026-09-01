@@ -18,17 +18,26 @@ import {
   CheckCircle2, 
   AlertTriangle, 
   XCircle, 
+  MinusCircle, 
+  HelpCircle, 
+  Clock, 
   Calendar, 
   Sparkles, 
   Search, 
   Filter, 
   RotateCcw,
+  CheckCheck,
   ChevronDown,
-  X
+  Info,
+  MoreVertical,
+  X,
+  MessageSquare
 } from 'lucide-react';
 import { 
   getRecordKey, 
-  isStudentExcluded 
+  isStudentExcluded, 
+  calculateStudentStats, 
+  getStatusLabel 
 } from '../utils/attendanceHelpers';
 
 interface MonthlyGridViewProps {
@@ -54,33 +63,16 @@ interface MonthlyGridViewProps {
   grade3Exclusion?: Grade3ExclusionConfig;
 }
 
-// 내부 상태 순환 정의 (클릭 시 순서대로 변경)
-const getNextStatusInternal = (current: AttendanceStatus): AttendanceStatus => {
+// 상태 클릭 시 다음 상태로 순환
+const getNextStatusCycle = (current: AttendanceStatus): AttendanceStatus => {
   switch (current) {
-    case 'NONE':
-      return 'PRESENT';
-    case 'PRESENT':
-      return 'LATE';
-    case 'LATE':
-      return 'ABSENT';
-    case 'ABSENT':
-      return 'EARLY_LEAVE';
-    case 'EARLY_LEAVE':
-      return 'OFFICIAL_ABSENT';
-    case 'OFFICIAL_ABSENT':
-    default:
-      return 'NONE';
-  }
-};
-
-const getStatusName = (st: AttendanceStatus): string => {
-  switch (st) {
-    case 'PRESENT': return '출석';
-    case 'LATE': return '지각';
-    case 'ABSENT': return '결석';
-    case 'EARLY_LEAVE': return '조퇴';
-    case 'OFFICIAL_ABSENT': return '인정결석';
-    default: return '미체크';
+    case 'NONE': return 'PRESENT';
+    case 'PRESENT': return 'LATE';
+    case 'LATE': return 'ABSENT';
+    case 'ABSENT': return 'EARLY_LEAVE';
+    case 'EARLY_LEAVE': return 'OFFICIAL_ABSENT';
+    case 'OFFICIAL_ABSENT': return 'NONE';
+    default: return 'PRESENT';
   }
 };
 
@@ -94,13 +86,17 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
   onUpdateRecord,
   onBatchUpdateDay,
   onFillDayAbsent,
+  onUpdateStudents,
+  onSessionChange,
+  onMonthChange,
   userRole,
+  grade3Exclusion
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGrade, setSelectedGrade] = useState<number | 'all'>('all');
   const [activePopoverDate, setActivePopoverDate] = useState<string | null>(null);
 
-  // 셀 상세 사유 입력 모달
+  // 셀 우클릭 상세 사유 입력 모달
   const [detailModal, setDetailModal] = useState<{
     isOpen: boolean;
     student?: Student;
@@ -117,18 +113,18 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
 
   const isReadOnly = userRole === 'student';
 
-  // 학년 및 검색 필터링
+  // 학년 필터링 & 검색 필터링 (원본 code 필드 및 번호 지원)
   const filteredStudents = useMemo(() => {
     return students.filter(st => {
       if (selectedGrade !== 'all' && st.grade !== selectedGrade) return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.trim().toLowerCase();
-      const code = `${st.grade}${String(st.classNumber).padStart(2, '0')}${String(st.studentNumber).padStart(2, '0')}`;
-      return st.name.toLowerCase().includes(q) || code.includes(q) || String(st.studentNumber).includes(q);
+      const codeStr = (st.code || `${st.grade}${String(st.classNumber || '').padStart(2, '0')}${String(st.studentNumber || '').padStart(2, '0')}`).toLowerCase();
+      return st.name.toLowerCase().includes(q) || codeStr.includes(q);
     });
   }, [students, selectedGrade, searchQuery]);
 
-  // 셀 단순 클릭 시 상태 순환 + Firestore 클라우드 즉시 전송
+  // 셀 단순 클릭 시 상태 순환 및 클라우드 실시간 전송
   const handleCellClick = (student: Student, dateStr: string) => {
     if (isReadOnly) return;
     if (isStudentExcluded(student, session, dateStr)) return;
@@ -136,7 +132,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
     const key = getRecordKey(student.id, session, dateStr);
     const currentRec = records[key];
     const currentStatus = currentRec?.status || 'NONE';
-    const nextStatus = getNextStatusInternal(currentStatus);
+    const nextStatus = getNextStatusCycle(currentStatus);
 
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -185,112 +181,11 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
     setDetailModal(prev => ({ ...prev, isOpen: false }));
   };
 
-  // 학생별 개별 통계 계산
-  const calcStudentStats = (st: Student) => {
-    let present = 0;
-    let late = 0;
-    let absent = 0;
-    let early = 0;
-    let official = 0;
-    let totalActiveDays = 0;
-
-    activeDays.forEach(d => {
-      if (isStudentExcluded(st, session, d.dateStr)) return;
-      totalActiveDays++;
-      const key = getRecordKey(st.id, session, d.dateStr);
-      const rec = records[key];
-      if (rec?.status === 'PRESENT') present++;
-      else if (rec?.status === 'LATE') late++;
-      else if (rec?.status === 'ABSENT') absent++;
-      else if (rec?.status === 'EARLY_LEAVE') early++;
-      else if (rec?.status === 'OFFICIAL_ABSENT') official++;
-    });
-
-    const attended = present + late;
-    const rate = totalActiveDays > 0 ? ((attended / totalActiveDays) * 100).toFixed(1) : '0.0';
-
-    return { present, late, absent, early, official, totalActiveDays, rate };
-  };
-
-  // 전체 요약 통계 계산
-  const overallStats = useMemo(() => {
-    let totalSlots = 0;
-    let presentCount = 0;
-    let lateCount = 0;
-    let absentCount = 0;
-
-    activeDays.forEach(day => {
-      students.forEach(st => {
-        if (!st.active || isStudentExcluded(st, session, day.dateStr)) return;
-        totalSlots++;
-        const key = getRecordKey(st.id, session, day.dateStr);
-        const rec = records[key];
-        if (rec?.status === 'PRESENT') presentCount++;
-        else if (rec?.status === 'LATE') lateCount++;
-        else if (rec?.status === 'ABSENT') absentCount++;
-      });
-    });
-
-    const checkedTotal = presentCount + lateCount;
-    const rate = totalSlots > 0 ? ((checkedTotal / totalSlots) * 100).toFixed(1) : '0.0';
-
-    return {
-      totalSlots,
-      presentCount,
-      lateCount,
-      absentCount,
-      rate
-    };
-  }, [students, activeDays, records, session]);
-
   return (
     <div className="space-y-4 animate-fade-in">
       
-      {/* 상단 4대 현황 카드 배너 */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-2xs flex items-center justify-between">
-          <div>
-            <div className="text-2xs font-bold text-slate-500 dark:text-slate-400">등록 학생수</div>
-            <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">{students.length}명</div>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
-            <Sparkles className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-2xs flex items-center justify-between">
-          <div>
-            <div className="text-2xs font-bold text-emerald-600 dark:text-emerald-400">정상 출석 누적</div>
-            <div className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5">{overallStats.presentCount}회</div>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-2xs flex items-center justify-between">
-          <div>
-            <div className="text-2xs font-bold text-amber-600 dark:text-amber-400">지각 누적</div>
-            <div className="text-xl font-black text-amber-600 dark:text-amber-400 mt-0.5">{overallStats.lateCount}회</div>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-amber-50 dark:bg-amber-950/50 flex items-center justify-center text-amber-600 dark:text-amber-400">
-            <AlertTriangle className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-2xs flex items-center justify-between">
-          <div>
-            <div className="text-2xs font-bold text-slate-500 dark:text-slate-400">월간 평균 출석률</div>
-            <div className="text-xl font-black text-indigo-600 dark:text-indigo-400 mt-0.5">{overallStats.rate}%</div>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-purple-50 dark:bg-purple-950/50 flex items-center justify-center text-purple-600 dark:text-purple-400">
-            <Calendar className="w-5 h-5" />
-          </div>
-        </div>
-      </div>
-
       {/* 필터 및 검색 바 */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 border border-slate-200/80 dark:border-slate-800 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
         
         {/* 학년 필터 */}
         <div className="flex items-center gap-1.5 w-full sm:w-auto">
@@ -321,7 +216,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="이름 또는 학번 검색..."
-            className="w-full text-xs pl-8 pr-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-slate-900 dark:text-white placeholder:text-slate-400"
+            className="w-full text-xs pl-8 pr-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 text-slate-900 dark:text-white placeholder:text-slate-400"
           />
         </div>
       </div>
@@ -404,45 +299,24 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                     )}
                   </th>
                 ))}
-
-                {/* 통계 열 헤더 */}
-                <th className="py-2.5 px-2.5 min-w-[55px] border-r border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-indigo-600 dark:text-indigo-400">
-                  출석률
-                </th>
-                <th className="py-2.5 px-2 min-w-[40px] border-r border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-emerald-600">
-                  출석
-                </th>
-                <th className="py-2.5 px-2 min-w-[40px] border-r border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-amber-600">
-                  지각
-                </th>
-                <th className="py-2.5 px-2 min-w-[40px] border-r border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-rose-600">
-                  결석
-                </th>
-                <th className="py-2.5 px-2 min-w-[40px] border-r border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-purple-600">
-                  조퇴
-                </th>
-                <th className="py-2.5 px-2 min-w-[40px] bg-slate-100/80 dark:bg-slate-800/80 text-center font-bold text-blue-600">
-                  인정
-                </th>
               </tr>
             </thead>
 
             {/* 테이블 바디 */}
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-slate-800 dark:text-slate-200">
               {filteredStudents.map((st) => {
-                const fullCode = `${st.grade}${String(st.classNumber).padStart(2, '0')}${String(st.studentNumber).padStart(2, '0')}`;
-                const studentStats = calcStudentStats(st);
+                const displayCode = st.code || `${st.grade}${String(st.classNumber || '').padStart(2, '0')}${String(st.studentNumber || '').padStart(2, '0')}`;
 
                 return (
                   <tr key={st.id} className="hover:bg-indigo-50/40 dark:hover:bg-indigo-950/30 transition-colors">
                     
                     {/* 고정 열 1: 학번 */}
-                    <td className="py-1 px-2 sticky left-0 z-20 bg-white dark:bg-slate-900 font-mono font-bold text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-800 text-center text-2xs">
-                      {fullCode}
+                    <td className="py-1.5 px-2 sticky left-0 z-20 bg-white dark:bg-slate-900 font-mono font-bold text-slate-600 dark:text-slate-400 border-r border-slate-200 dark:border-slate-800 text-center text-2xs">
+                      {displayCode}
                     </td>
 
-                    {/* 고정 열 2: 이름 & 좌석 */}
-                    <td className="py-1 px-2.5 sticky left-[70px] z-20 bg-white dark:bg-slate-900 font-black border-r border-slate-200 dark:border-slate-800 shadow-xs text-center">
+                    {/* 고정 열 2: 이름 */}
+                    <td className="py-1.5 px-2.5 sticky left-[70px] z-20 bg-white dark:bg-slate-900 font-black border-r border-slate-200 dark:border-slate-800 shadow-xs text-center">
                       <div className="flex items-center justify-center gap-1.5">
                         <span>{st.name}</span>
                         {st.seatNumber && (
@@ -488,7 +362,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                               ? 'bg-blue-50/40 dark:bg-blue-950/20'
                               : ''
                           }`}
-                          title={rec?.reason ? `[${getStatusName(rec.status)}] 사유: ${rec.reason} (${rec.checkInTime || ''})` : undefined}
+                          title={rec?.reason ? `[${getStatusLabel(rec.status)}] 사유: ${rec.reason} (${rec.checkInTime || ''})` : undefined}
                         >
                           <div className="h-9 w-full flex items-center justify-center relative">
                             <StatusIcon status={rec?.status || 'NONE'} />
@@ -499,26 +373,6 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                         </td>
                       );
                     })}
-
-                    {/* 학생별 누적 통계 열 */}
-                    <td className="py-1 px-2 border-r border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-black text-indigo-600 dark:text-indigo-400">
-                      {studentStats.rate}%
-                    </td>
-                    <td className="py-1 px-1.5 border-r border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-bold text-emerald-600">
-                      {studentStats.present}
-                    </td>
-                    <td className="py-1 px-1.5 border-r border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-bold text-amber-600">
-                      {studentStats.late}
-                    </td>
-                    <td className="py-1 px-1.5 border-r border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-bold text-rose-600">
-                      {studentStats.absent}
-                    </td>
-                    <td className="py-1 px-1.5 border-r border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-bold text-purple-600">
-                      {studentStats.early}
-                    </td>
-                    <td className="py-1 px-1.5 bg-slate-50/50 dark:bg-slate-800/30 text-center font-mono font-bold text-blue-600">
-                      {studentStats.official}
-                    </td>
 
                   </tr>
                 );
@@ -572,7 +426,7 @@ export const MonthlyGridView: React.FC<MonthlyGridViewProps> = ({
                           : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200'
                       }`}
                     >
-                      {getStatusName(st)}
+                      {getStatusLabel(st)}
                     </button>
                   ))}
                 </div>
