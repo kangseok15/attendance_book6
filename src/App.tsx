@@ -147,13 +147,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ViewTab>(() => getInitialTab(getInitialRole()));
   const [session, setSession] = useState<SessionType>('morning');
 
-  // ✨ 접속 시 현재 실제 날짜를 기준으로 연도와 월을 자동 초기화
-  const [year, setYear] = useState<number>(() => {
-    return new Date().getFullYear();
-  });
-  const [month, setMonth] = useState<number>(() => {
-    return new Date().getMonth() + 1;
-  });
+  // 현재 실제 날짜 기준으로 연/월 자동 설정
+  const [year, setYear] = useState<number>(() => new Date().getFullYear());
+  const [month, setMonth] = useState<number>(() => new Date().getMonth() + 1);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -192,7 +188,7 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
-  // Firestore 마스터 자동 생성
+  // Firestore 초기 생성 보장
   useEffect(() => {
     const initMasterStateIfEmpty = async () => {
       try {
@@ -215,7 +211,7 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // Firestore 실시간 동기화 리스너
+  // 🔥 Firestore 실시간 리스너 (다른 기기 및 키오스크에서 변경된 내용 수신)
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -269,6 +265,7 @@ export default function App() {
     setIsRoleModalOpen(true);
   };
 
+  // 🔥 관리자가 학생 명단이나 학원 요일을 바꿀 때 Firestore로 즉시 전송
   const handleUpdateStudents = async (newStudents: Student[]) => {
     const sorted = sortStudents(newStudents, [3, 2, 1], true);
     setStudents(sorted);
@@ -281,7 +278,6 @@ export default function App() {
     saveGrade3Exclusion(newConfig);
   };
 
-  // ✨ 현재 월에 맞춰 자동 날짜 세팅
   const [daysConfig, setDaysConfig] = useState<{
     morning: DayConfig[];
     night: DayConfig[];
@@ -475,7 +471,7 @@ export default function App() {
     setTimeout(() => setSyncToast(null), 3500);
   };
 
-  // 단일 출결 수정 (Firestore 클라우드 실시간 전송)
+  // 🔥 관리자가 출석부 셀을 클릭/수정할 때 Firestore 클라우드로 즉시 전송하는 핵심 함수
   const handleUpdateRecord = async (
     studentId: string,
     dateStr: string,
@@ -514,10 +510,11 @@ export default function App() {
       return updated;
     });
 
+    // Firestore에 직접 저장 -> 다른 태블릿, PC로 즉시 브로드캐스팅
     await saveRecordToFirestore(studentId, session, dateStr, status, finalReason, finalCheckInTime);
   };
 
-  // 일괄 출결 처리
+  // 🔥 관리자가 일괄 출결 처리할 때 Firestore 클라우드로 즉각 전송
   const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
@@ -566,7 +563,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 미체크 결석 채우기
+  // 🔥 관리자가 미체크 결석 채우기 할 때 Firestore 클라우드로 즉각 전송
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
