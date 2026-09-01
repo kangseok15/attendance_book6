@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Student, AttendanceRecord, UserRole } from '../types/attendance';
-import { getInitialStudents } from '../data/initialData';
+import { defaultStudents } from '../data/initialData';
 import { 
   loadSnapshots, 
   deleteSnapshot, 
@@ -338,7 +338,6 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
     setIsProcessing(true);
     try {
       saveSnapshot('초기 학생 명단 리셋 전 자동 백업', records, students);
-      const defaultStudents = getInitialStudents();
       onRestoreData(defaultStudents, records);
       await saveFullRestoreToFirestore(records, defaultStudents);
       setSnapshots(loadSnapshots());
