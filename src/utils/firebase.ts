@@ -68,6 +68,28 @@ export async function syncMasterRecordsToFirestore(
 }
 
 /**
+ * Firestore 전체 출결 상태 1회 가져오기 (apiSync.ts 빌드 호환용)
+ */
+export async function fetchFirestoreAttendanceState() {
+  try {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const docSnap = await getDoc(masterRef);
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      return {
+        success: true,
+        students: data.students || [],
+        records: data.records || {}
+      };
+    }
+    return { success: true, students: [], records: {} };
+  } catch (e) {
+    console.error('[Firebase] fetchFirestoreAttendanceState error:', e);
+    return { success: false, error: e };
+  }
+}
+
+/**
  * 단일 출결 저장
  */
 export async function saveRecordToFirestore(
