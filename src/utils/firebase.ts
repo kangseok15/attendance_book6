@@ -41,7 +41,7 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * master_state 전체 records 동기화
+ * master_state 전체 records 동기화 (undefined 자동 정제 -> Firestore 100% 저장 보장)
  */
 export async function syncMasterRecordsToFirestore(
   newRecords: Record<string, AttendanceRecord>, 
@@ -55,9 +55,13 @@ export async function syncMasterRecordsToFirestore(
       ? studentsList 
       : (existingData.students || []);
 
+    // 🔥 Firestore undefined 직렬화 에러 원천 차단
+    const cleanRecords = JSON.parse(JSON.stringify(newRecords || {}));
+    const cleanStudents = JSON.parse(JSON.stringify(studentsToSave || []));
+
     await setDoc(masterRef, {
-      students: studentsToSave,
-      records: newRecords,
+      students: cleanStudents,
+      records: cleanRecords,
       updatedAt: Date.now()
     });
     return true;
@@ -110,11 +114,10 @@ export async function saveRecordToFirestore(
     if (status === 'NONE') {
       delete existingRecords[key];
     } else {
-      existingRecords[key] = {
-        status,
-        ...(reason ? { reason } : {}),
-        ...(checkInTime ? { checkInTime } : {})
-      };
+      const recordItem: AttendanceRecord = { status };
+      if (reason && reason.trim() !== '') recordItem.reason = reason.trim();
+      if (checkInTime && checkInTime.trim() !== '') recordItem.checkInTime = checkInTime.trim();
+      existingRecords[key] = recordItem;
     }
 
     await syncMasterRecordsToFirestore(existingRecords, data.students);
@@ -151,11 +154,10 @@ export async function saveBatchToFirestore(
       if (u.status === 'NONE') {
         delete existingRecords[key];
       } else {
-        existingRecords[key] = {
-          status: u.status,
-          ...(u.reason ? { reason: u.reason } : {}),
-          ...(u.checkInTime ? { checkInTime: u.checkInTime } : {})
-        };
+        const recordItem: AttendanceRecord = { status: u.status };
+        if (u.reason && u.reason.trim() !== '') recordItem.reason = u.reason.trim();
+        if (u.checkInTime && u.checkInTime.trim() !== '') recordItem.checkInTime = u.checkInTime.trim();
+        existingRecords[key] = recordItem;
       }
     });
 
@@ -199,7 +201,7 @@ export async function saveBackupToFirestore(name: string, payload: any) {
     const docRef = doc(db, 'attendance_backups', `backup_${Date.now()}`);
     await setDoc(docRef, {
       name,
-      payload,
+      payload: JSON.parse(JSON.stringify(payload)),
       createdAt: Date.now()
     });
     return true;
