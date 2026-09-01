@@ -186,7 +186,6 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
-  // Firestore 초기 생성 보장
   useEffect(() => {
     const initMasterStateIfEmpty = async () => {
       try {
@@ -209,7 +208,7 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // 🔥 Firestore 실시간 리스너 (삭제/비우기 동작도 즉시 반영되도록 완전 교체)
+  // 🔥 Firestore 실시간 리스너 (완전 동기화)
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -714,7 +713,7 @@ export default function App() {
     }));
   };
 
-  // 🔥 출결 비우기 시 master_state 전체를 교체 저장하여 모든 기기에 즉시 삭제 반영
+  // 🔥 [출결 비우기] - 특정 날짜 비우기
   const handleClearDate = async (dateStr: string, gradeFilter?: number) => {
     saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, records, students);
     const updated = { ...records };
@@ -727,17 +726,28 @@ export default function App() {
     setRecords(updated);
     saveAttendanceRecords(updated);
 
-    const masterRef = doc(db, 'attendance', 'master_state');
-    const masterSnap = await getDoc(masterRef);
-    const masterRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
-    Object.keys(masterRecords).forEach(k => {
-      if (k.endsWith(`_${session}_${dateStr}`)) {
-        delete masterRecords[k];
-      }
-    });
-    await setDoc(masterRef, { records: masterRecords }, { merge: true });
+    try {
+      const masterRef = doc(db, 'attendance', 'master_state');
+      const masterSnap = await getDoc(masterRef);
+      const masterRecords = masterSnap.exists() ? { ...(masterSnap.data().records || {}) } : {};
+      
+      Object.keys(masterRecords).forEach(k => {
+        if (k.endsWith(`_${session}_${dateStr}`)) {
+          const stId = k.split('_')[0];
+          const st = students.find(s => s.id === stId);
+          if (gradeFilter === undefined || (st && st.grade === gradeFilter)) {
+            delete masterRecords[k];
+          }
+        }
+      });
+      // Firestore master_state 교체 저장 -> 모든 기기에 즉시 삭제 브로드캐스팅
+      await setDoc(masterRef, { records: masterRecords }, { merge: true });
+    } catch (e) {
+      console.error('handleClearDate error:', e);
+    }
   };
 
+  // 🔥 [출결 비우기] - 특정 월/세션 비우기
   const handleClearMonthSession = async (targetYear: number, targetMonth: number, targetSession: SessionType) => {
     const sessionName = targetSession === 'morning' ? '아침' : '야간';
     saveSnapshot(`[${targetYear}년 ${targetMonth}월 ${sessionName}] 출결 비우기 전 자동 백업`, records, students);
@@ -756,23 +766,32 @@ export default function App() {
     setRecords(updated);
     saveAttendanceRecords(updated);
 
-    const masterRef = doc(db, 'attendance', 'master_state');
-    const masterSnap = await getDoc(masterRef);
-    const masterRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
-    Object.keys(masterRecords).forEach(k => {
-      const parts = k.split('_');
-      if (parts.length >= 3 && parts[1] === targetSession && parts[2].startsWith(monthPrefix)) {
-        delete masterRecords[k];
-      }
-    });
-    await setDoc(masterRef, { records: masterRecords }, { merge: true });
+    try {
+      const masterRef = doc(db, 'attendance', 'master_state');
+      const masterSnap = await getDoc(masterRef);
+      const masterRecords = masterSnap.exists() ? { ...(masterSnap.data().records || {}) } : {};
+      Object.keys(masterRecords).forEach(k => {
+        const parts = k.split('_');
+        if (parts.length >= 3 && parts[1] === targetSession && parts[2].startsWith(monthPrefix)) {
+          delete masterRecords[k];
+        }
+      });
+      await setDoc(masterRef, { records: masterRecords }, { merge: true });
+    } catch (e) {
+      console.error('handleClearMonthSession error:', e);
+    }
   };
 
+  // 🔥 [출결 비우기] - 전체 초기화
   const handleClearAll = async () => {
     saveSnapshot('전체 출결 비우기 전 자동 백업', records, students);
     setRecords({});
     saveAttendanceRecords({});
-    await setDoc(doc(db, 'attendance', 'master_state'), { records: {} }, { merge: true });
+    try {
+      await setDoc(doc(db, 'attendance', 'master_state'), { records: {} }, { merge: true });
+    } catch (e) {
+      console.error('handleClearAll error:', e);
+    }
   };
 
   const handleRestoreData = async (restoredStudents?: Student[], restoredRecords?: Record<string, AttendanceRecord>) => {
