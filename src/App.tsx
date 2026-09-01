@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Student, 
   SessionType, 
@@ -57,7 +57,7 @@ import {
 } from './utils/attendanceHelpers';
 
 import { doc, onSnapshot, getDoc, setDoc } from 'firebase/firestore';
-import { db, saveRecordToFirestore, saveBatchToFirestore, saveStudentsToFirestore, syncMasterRecordsToFirestore } from './utils/firebase';
+import { db, syncMasterRecordsToFirestore, saveStudentsToFirestore } from './utils/firebase';
 
 export default function App() {
   const getInitialRole = (): UserRole => {
@@ -175,6 +175,12 @@ export default function App() {
     loadAttendanceRecords()
   );
 
+  // 최신 상태 유지를 위한 ref
+  const recordsRef = useRef(records);
+  recordsRef.current = records;
+  const studentsRef = useRef(students);
+  studentsRef.current = students;
+
   const [schoolEvents, setSchoolEvents] = useState<SchoolEvent[]>(() => loadSchoolEvents());
   const [includeWednesdaysInNight, setIncludeWednesdaysInNight] = useState<boolean>(() => loadIncludeWednesdaysInNight());
   const [grade3Exclusion, setGrade3Exclusion] = useState<Grade3ExclusionConfig>(() => loadGrade3Exclusion());
@@ -186,39 +192,19 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
-  // Firestore 초기 세팅
+  // 🔥 Firestore 실시간 리스너 (원격 변경사항 즉시 강제 렌더링)
   useEffect(() => {
-    const initMaster = async () => {
-      try {
-        const masterRef = doc(db, 'attendance', 'master_state');
-        const snap = await getDoc(masterRef);
-        if (!snap.exists() || !snap.data()?.students) {
-          const initSt = loadStudents();
-          const initRec = loadAttendanceRecords();
-          await setDoc(masterRef, {
-            students: initSt,
-            records: initRec,
-            updatedAt: Date.now()
-          });
-        }
-      } catch (e) {
-        console.warn('Firestore init check:', e);
-      }
-    };
-    initMaster();
-  }, []);
-
-  // 🔥 Firestore 실시간 리스너 (모든 기기 100% 실시간 일치)
-  useEffect(() => {
-    const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const unsub = onSnapshot(masterRef, { includeMetadataChanges: true }, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (Array.isArray(data.students) && data.students.length > 0) {
-          setStudents(data.students);
+          setStudents([...data.students]);
           saveStudents(data.students);
         }
         if (data.records !== undefined && typeof data.records === 'object') {
-          setRecords(data.records);
+          // 새 객체로 복제하여 리액트 강제 재렌더링 트리거
+          setRecords({ ...data.records });
           saveAttendanceRecords(data.records);
         }
         const now = new Date();
@@ -226,7 +212,7 @@ export default function App() {
       }
     });
 
-    return () => unsubMaster();
+    return () => unsub();
   }, []);
 
   const handleRoleChange = (newRole: UserRole) => {
@@ -337,11 +323,11 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (data.students) {
-          setStudents(data.students);
+          setStudents([...data.students]);
           saveStudents(data.students);
         }
         if (data.records !== undefined) {
-          setRecords(data.records);
+          setRecords({ ...data.records });
           saveAttendanceRecords(data.records);
         }
       }
@@ -462,7 +448,7 @@ export default function App() {
     setTimeout(() => setSyncToast(null), 3000);
   };
 
-  // 단일 출결 수정
+  // 🔥 단일 출결 수정 (즉시 클라우드 동기화)
   const handleUpdateRecord = async (
     studentId: string,
     dateStr: string,
@@ -474,35 +460,23 @@ export default function App() {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    let finalCheckInTime: string | undefined = undefined;
-    if (status !== 'NONE') {
-      finalCheckInTime = checkInTime !== undefined 
-        ? checkInTime 
-        : (records[key]?.checkInTime || currentTimestamp);
-    }
-
-    let finalReason: string | undefined = undefined;
-    if (typeof reason === 'string' && reason.trim() !== '') {
-      finalReason = reason.trim();
-    }
-
-    const updated = { ...records };
+    const currentRecords = { ...recordsRef.current };
     if (status === 'NONE') {
-      delete updated[key];
+      delete currentRecords[key];
     } else {
-      updated[key] = {
+      currentRecords[key] = {
         status,
-        reason: finalReason,
-        checkInTime: finalCheckInTime,
+        ...(reason && reason.trim() !== '' ? { reason: reason.trim() } : {}),
+        checkInTime: checkInTime || currentRecords[key]?.checkInTime || currentTimestamp
       };
     }
 
-    setRecords(updated);
-    saveAttendanceRecords(updated);
-    await syncMasterRecordsToFirestore(updated, students);
+    setRecords(currentRecords);
+    saveAttendanceRecords(currentRecords);
+    await syncMasterRecordsToFirestore(currentRecords, studentsRef.current);
   };
 
-  // 일괄 출결 처리
+  // 🔥 일괄 출결 수정
   const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
@@ -510,38 +484,36 @@ export default function App() {
   ) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const updated = { ...recordsRef.current };
 
-    const newRecords = { ...records };
-    students
+    studentsRef.current
       .filter(st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === Number(gradeFilter)))
       .forEach(st => {
         const key = getRecordKey(st.id, session, dateStr);
-        const recCheckIn = status !== 'NONE' ? (records[key]?.checkInTime || currentTimestamp) : undefined;
         if (status === 'NONE') {
-          delete newRecords[key];
+          delete updated[key];
         } else {
-          newRecords[key] = {
+          updated[key] = {
             status,
-            reason: undefined,
-            checkInTime: recCheckIn,
+            checkInTime: updated[key]?.checkInTime || currentTimestamp,
           };
         }
       });
 
-    setRecords(newRecords);
-    saveAttendanceRecords(newRecords);
-    await syncMasterRecordsToFirestore(newRecords, students);
+    setRecords(updated);
+    saveAttendanceRecords(updated);
+    await syncMasterRecordsToFirestore(updated, studentsRef.current);
   };
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기 실시간 100% 동기화)
+  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기 완벽 동기화)
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const trackingKey = `${session}_${dateStr}_${gradeFilter ?? 'all'}`;
 
-    const updated = { ...records };
+    const updated = { ...recordsRef.current };
     const targetGrade = gradeFilter !== undefined ? Number(gradeFilter) : undefined;
 
     const parts = dateStr.split('-');
@@ -549,7 +521,7 @@ export default function App() {
     const weekDays = ['일', '월', '화', '수', '목', '금', '토'];
     const currentDayOfWeek = weekDays[dayObj.getDay()];
 
-    const applicableStudents = students.filter(
+    const applicableStudents = studentsRef.current.filter(
       st => st.active && !isStudentExcluded(st, session, dateStr, currentDayOfWeek) && (targetGrade === undefined || st.grade === targetGrade)
     );
 
@@ -566,7 +538,6 @@ export default function App() {
       emptyKeys.forEach(key => {
         updated[key] = {
           status: 'ABSENT',
-          reason: undefined,
           checkInTime: currentTimestamp,
         };
       });
@@ -599,7 +570,7 @@ export default function App() {
 
     setRecords(updated);
     saveAttendanceRecords(updated);
-    await syncMasterRecordsToFirestore(updated, students);
+    await syncMasterRecordsToFirestore(updated, studentsRef.current);
   };
 
   const handleToggleDay = (dateStr: string) => {
@@ -650,11 +621,11 @@ export default function App() {
     }));
   };
 
-  // 🔥 [출결 비우기] - 특정 날짜 비우기 (실시간 즉시 반영)
+  // 🔥 [출결 비우기] - 특정 날짜 비우기
   const handleClearDate = async (dateStr: string, gradeFilter?: number) => {
-    saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, records, students);
-    const updated = { ...records };
-    students
+    saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, recordsRef.current, studentsRef.current);
+    const updated = { ...recordsRef.current };
+    studentsRef.current
       .filter(st => gradeFilter === undefined || st.grade === gradeFilter)
       .forEach(st => {
         const key = getRecordKey(st.id, session, dateStr);
@@ -663,15 +634,15 @@ export default function App() {
 
     setRecords(updated);
     saveAttendanceRecords(updated);
-    await syncMasterRecordsToFirestore(updated, students);
+    await syncMasterRecordsToFirestore(updated, studentsRef.current);
   };
 
   // 🔥 [출결 비우기] - 특정 월/세션 비우기
   const handleClearMonthSession = async (targetYear: number, targetMonth: number, targetSession: SessionType) => {
     const sessionName = targetSession === 'morning' ? '아침' : '야간';
-    saveSnapshot(`[${targetYear}년 ${targetMonth}월 ${sessionName}] 출결 비우기 전 자동 백업`, records, students);
+    saveSnapshot(`[${targetYear}년 ${targetMonth}월 ${sessionName}] 출결 비우기 전 자동 백업`, recordsRef.current, studentsRef.current);
     const monthPrefix = `${targetYear}-${String(targetMonth).padStart(2, '0')}`;
-    const updated = { ...records };
+    const updated = { ...recordsRef.current };
     Object.keys(updated).forEach(key => {
       const parts = key.split('_');
       if (parts.length >= 3) {
@@ -685,25 +656,25 @@ export default function App() {
 
     setRecords(updated);
     saveAttendanceRecords(updated);
-    await syncMasterRecordsToFirestore(updated, students);
+    await syncMasterRecordsToFirestore(updated, studentsRef.current);
   };
 
   // 🔥 [출결 비우기] - 전체 초기화
   const handleClearAll = async () => {
-    saveSnapshot('전체 출결 비우기 전 자동 백업', records, students);
+    saveSnapshot('전체 출결 비우기 전 자동 백업', recordsRef.current, studentsRef.current);
     setRecords({});
     saveAttendanceRecords({});
-    await syncMasterRecordsToFirestore({}, students);
+    await syncMasterRecordsToFirestore({}, studentsRef.current);
   };
 
   const handleRestoreData = async (restoredStudents?: Student[], restoredRecords?: Record<string, AttendanceRecord>) => {
     const finalStudents = restoredStudents && Array.isArray(restoredStudents) && restoredStudents.length > 0
       ? restoredStudents
-      : students;
+      : studentsRef.current;
 
     const finalRecords = restoredRecords && typeof restoredRecords === 'object'
       ? restoredRecords
-      : records;
+      : recordsRef.current;
 
     setStudents(finalStudents);
     setRecords(finalRecords);
