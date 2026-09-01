@@ -41,7 +41,7 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * master_state 전체 records 동기화 (삭제/비우기/전체X 100% 완벽 동기화)
+ * master_state 전체 records 동기화
  */
 export async function syncMasterRecordsToFirestore(
   newRecords: Record<string, AttendanceRecord>, 
@@ -68,7 +68,7 @@ export async function syncMasterRecordsToFirestore(
 }
 
 /**
- * Firestore 전체 출결 상태 1회 가져오기 (apiSync.ts 빌드 호환용)
+ * Firestore 전체 출결 상태 1회 가져오기
  */
 export async function fetchFirestoreAttendanceState() {
   try {
@@ -126,7 +126,7 @@ export async function saveRecordToFirestore(
 }
 
 /**
- * 일괄 출결 저장 (전체 X 채우기, 전체 되돌리기 등)
+ * 일괄 출결 저장
  */
 export async function saveBatchToFirestore(
   updates: Array<{
@@ -189,4 +189,112 @@ export async function saveStudentsToFirestore(students: Student[]) {
     console.error('[Firebase] saveStudentsToFirestore error:', e);
     return false;
   }
+}
+
+/**
+ * 백업 저장
+ */
+export async function saveBackupToFirestore(name: string, payload: any) {
+  try {
+    const docRef = doc(db, 'attendance_backups', `backup_${Date.now()}`);
+    await setDoc(docRef, {
+      name,
+      payload,
+      createdAt: Date.now()
+    });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveBackupToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * 전체 복원
+ */
+export async function saveFullRestoreToFirestore(
+  records: Record<string, AttendanceRecord>,
+  students?: Student[]
+) {
+  try {
+    return await syncMasterRecordsToFirestore(records, students);
+  } catch (e) {
+    console.error('[Firebase] saveFullRestoreToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * 실시간 구독 리스너
+ */
+export function subscribeToFirestoreAttendanceState(
+  callback: (state: { students?: Student[]; records?: Record<string, AttendanceRecord> }) => void
+) {
+  try {
+    const docRef = doc(db, 'attendance', 'master_state');
+    return onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        callback({
+          students: data.students,
+          records: data.records
+        });
+      }
+    }, (error) => {
+      console.warn('[Firebase] Firestore subscribe error:', error);
+    });
+  } catch (e) {
+    console.warn('[Firebase] Listener registration failed:', e);
+    return () => {};
+  }
+}
+
+/**
+ * 출결 비우기
+ */
+export async function clearFirestoreAttendanceState(
+  type: 'single-day' | 'month-session' | 'all',
+  payload?: any
+) {
+  try {
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const docSnap = await getDoc(masterRef);
+    if (!docSnap.exists()) return true;
+
+    const data = docSnap.data();
+    const currentRecords = { ...(data.records || {}) };
+
+    if (type === 'single-day' && payload?.dateStr && payload?.session) {
+      Object.keys(currentRecords).forEach(key => {
+        if (key.endsWith(`_${payload.session}_${payload.dateStr}`)) {
+          delete currentRecords[key];
+        }
+      });
+    } else if (type === 'month-session' && payload?.year && payload?.month && payload?.session) {
+      const prefix = `${payload.year}-${String(payload.month).padStart(2, '0')}`;
+      Object.keys(currentRecords).forEach(key => {
+        const parts = key.split('_');
+        if (parts.length >= 3 && parts[1] === payload.session && parts[2].startsWith(prefix)) {
+          delete currentRecords[key];
+        }
+      });
+    } else if (type === 'all') {
+      return await syncMasterRecordsToFirestore({}, data.students);
+    }
+
+    return await syncMasterRecordsToFirestore(currentRecords, data.students);
+  } catch (e) {
+    console.error('[Firebase] clearFirestoreAttendanceState error:', e);
+    return false;
+  }
+}
+
+/**
+ * master_state 직접 저장
+ */
+export async function saveFirestoreMasterState(
+  records: Record<string, AttendanceRecord>,
+  students?: Student[]
+) {
+  return await syncMasterRecordsToFirestore(records, students);
 }
