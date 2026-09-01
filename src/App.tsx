@@ -186,6 +186,7 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
+  // Firestore 초기 생성 보장
   useEffect(() => {
     const initMasterStateIfEmpty = async () => {
       try {
@@ -208,7 +209,7 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // Firestore 실시간 리스너
+  // 🔥 Firestore 실시간 리스너 (완전 동기화)
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -554,7 +555,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기) 완벽 처리
+  // 🔥 전체 X(미체크 결석 채우기 / 되돌리기) - 학생 ID 및 제외 여부 100% 매칭
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -570,8 +571,15 @@ export default function App() {
 
     const updated = { ...records };
     const targetGrade = gradeFilter !== undefined ? Number(gradeFilter) : undefined;
+
+    // 현재 선택된 날짜의 요일 구하기
+    const parts = dateStr.split('-');
+    const dayObj = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    const weekDays = ['일', '월', '화', '수', '목', '금', '토'];
+    const currentDayOfWeek = weekDays[dayObj.getDay()];
+
     const applicableStudents = students.filter(
-      st => st.active && !isStudentExcluded(st, session, dateStr) && (targetGrade === undefined || st.grade === targetGrade)
+      st => st.active && !isStudentExcluded(st, session, dateStr, currentDayOfWeek) && (targetGrade === undefined || st.grade === targetGrade)
     );
 
     const emptyKeys: string[] = [];
@@ -584,7 +592,7 @@ export default function App() {
     });
 
     if (emptyKeys.length > 0) {
-      // 미체크 학생을 결석(ABSENT)으로 설정
+      // 1. 미체크 학생 결석(ABSENT) 처리
       emptyKeys.forEach(key => {
         updated[key] = {
           status: 'ABSENT',
@@ -606,7 +614,7 @@ export default function App() {
         [trackingKey]: emptyKeys,
       }));
     } else {
-      // 이미 결석 처리된 학생들을 빈칸(NONE)으로 원복
+      // 2. 이미 결석으로 채워진 상태에서 다시 클릭 시 빈칸(NONE)으로 원복
       const previousKeys = lastFilledDayKeys[trackingKey];
       if (previousKeys && previousKeys.length > 0) {
         previousKeys.forEach(key => {
