@@ -5,8 +5,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { Student, AttendanceRecord, UserRole } from '../types/attendance';
-import { defaultStudents } from '../data/initialData';
 import { 
+  loadStudents,
   loadSnapshots, 
   deleteSnapshot, 
   clearAllSnapshots, 
@@ -332,16 +332,17 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
 
   // 초기 학생 명단 리셋
   const handleResetInitialStudents = async () => {
-    const confirmMsg = '학생 명단을 시스템 기본 초기 명단(45명)으로 재설정하시겠습니까?\n출결 기록은 유지되며, 학생 기본 정보(학번/이름/학원요일)만 초기화됩니다.';
+    const confirmMsg = '학생 명단을 시스템 기본 초기 명단으로 재설정하시겠습니까?\n출결 기록은 유지되며, 학생 기본 정보(학번/이름/학원요일)만 초기화됩니다.';
     if (!window.confirm(confirmMsg)) return;
 
     setIsProcessing(true);
     try {
       saveSnapshot('초기 학생 명단 리셋 전 자동 백업', records, students);
-      onRestoreData(defaultStudents, records);
-      await saveFullRestoreToFirestore(records, defaultStudents);
+      const defaultStudentsList = loadStudents();
+      onRestoreData(defaultStudentsList, records);
+      await saveFullRestoreToFirestore(records, defaultStudentsList);
       setSnapshots(loadSnapshots());
-      showFeedback('success', '학생 명단이 초기 기본값(45명)으로 안전하게 리셋되었습니다.');
+      showFeedback('success', '학생 명단이 초기 기본값으로 안전하게 리셋되었습니다.');
     } catch (e: any) {
       showFeedback('error', '초기화 실패: ' + e.message);
     } finally {
@@ -771,10 +772,10 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                 <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                 <div>
                   <div className="text-xs sm:text-sm font-bold text-amber-950 dark:text-amber-200">
-                    초기 기본 명단 복원 (45명)
+                    초기 기본 명단 복원
                   </div>
                   <p className="text-xs text-amber-800 dark:text-amber-300 mt-1 leading-relaxed">
-                    학생 명단 데이터가 꼬이거나 손상되었을 때, 숭신고 미래인재반 기본 45명 명단으로 안전하게 되돌립니다. 기존 출결 기록은 보존됩니다[cite: 1].
+                    학생 명단 데이터가 꼬이거나 손상되었을 때, 숭신고 미래인재반 기본 명단으로 안전하게 되돌립니다. 기존 출결 기록은 보존됩니다[cite: 1].
                   </p>
                 </div>
               </div>
@@ -782,10 +783,10 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
               <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                 <div>
                   <div className="text-xs sm:text-sm font-black text-slate-800 dark:text-slate-200">
-                    기본 학생 45명 명단으로 재설정
+                    기본 학생 명단으로 재설정
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    현재 등록 학생: {students.length}명 ➔ 기본 45명[cite: 1]
+                    현재 등록 학생: {students.length}명
                   </p>
                 </div>
                 <button
