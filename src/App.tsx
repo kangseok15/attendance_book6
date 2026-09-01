@@ -209,7 +209,7 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // 🔥 Firestore 실시간 리스너 (완전 동기화)
+  // 🔥 Firestore 실시간 리스너 (삭제/비우기 동작도 즉시 반영되도록 완전 교체)
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -218,7 +218,7 @@ export default function App() {
           setStudents(data.students);
           saveStudents(data.students);
         }
-        if (data.records && typeof data.records === 'object') {
+        if (data.records !== undefined && typeof data.records === 'object') {
           setRecords(data.records);
           saveAttendanceRecords(data.records);
         }
@@ -343,7 +343,7 @@ export default function App() {
           setStudents(data.students);
           saveStudents(data.students);
         }
-        if (data.records) {
+        if (data.records !== undefined) {
           setRecords(data.records);
           saveAttendanceRecords(data.records);
         }
@@ -500,6 +500,9 @@ export default function App() {
         ...prev,
         [key]: updatedRecord,
       };
+      if (status === 'NONE') {
+        delete updated[key];
+      }
       saveAttendanceRecords(updated);
       return updated;
     });
@@ -530,11 +533,15 @@ export default function App() {
       .forEach(st => {
         const key = getRecordKey(st.id, session, dateStr);
         const recCheckIn = status !== 'NONE' ? (records[key]?.checkInTime || currentTimestamp) : undefined;
-        newRecords[key] = {
-          status,
-          reason: undefined,
-          checkInTime: recCheckIn,
-        };
+        if (status === 'NONE') {
+          delete newRecords[key];
+        } else {
+          newRecords[key] = {
+            status,
+            reason: undefined,
+            checkInTime: recCheckIn,
+          };
+        }
         updates.push({
           studentId: st.id,
           session,
@@ -555,7 +562,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 전체 X(미체크 결석 채우기 / 되돌리기) - 학생 ID 및 제외 여부 100% 매칭
+  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기)
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -572,7 +579,6 @@ export default function App() {
     const updated = { ...records };
     const targetGrade = gradeFilter !== undefined ? Number(gradeFilter) : undefined;
 
-    // 현재 선택된 날짜의 요일 구하기
     const parts = dateStr.split('-');
     const dayObj = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
     const weekDays = ['일', '월', '화', '수', '목', '금', '토'];
@@ -592,7 +598,6 @@ export default function App() {
     });
 
     if (emptyKeys.length > 0) {
-      // 1. 미체크 학생 결석(ABSENT) 처리
       emptyKeys.forEach(key => {
         updated[key] = {
           status: 'ABSENT',
@@ -614,16 +619,11 @@ export default function App() {
         [trackingKey]: emptyKeys,
       }));
     } else {
-      // 2. 이미 결석으로 채워진 상태에서 다시 클릭 시 빈칸(NONE)으로 원복
       const previousKeys = lastFilledDayKeys[trackingKey];
       if (previousKeys && previousKeys.length > 0) {
         previousKeys.forEach(key => {
           if (updated[key]?.status === 'ABSENT') {
-            updated[key] = {
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            };
+            delete updated[key];
             const stId = key.split('_')[0];
             updates.push({
               studentId: stId,
@@ -644,11 +644,7 @@ export default function App() {
         applicableStudents.forEach(st => {
           const key = getRecordKey(st.id, session, dateStr);
           if (updated[key]?.status === 'ABSENT') {
-            updated[key] = {
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            };
+            delete updated[key];
             updates.push({
               studentId: st.id,
               session,
@@ -718,6 +714,7 @@ export default function App() {
     }));
   };
 
+  // 🔥 출결 비우기 시 master_state 전체를 교체 저장하여 모든 기기에 즉시 삭제 반영
   const handleClearDate = async (dateStr: string, gradeFilter?: number) => {
     saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, records, students);
     const updated = { ...records };
@@ -729,7 +726,16 @@ export default function App() {
       });
     setRecords(updated);
     saveAttendanceRecords(updated);
-    await setDoc(doc(db, 'attendance', 'master_state'), { records: updated }, { merge: true });
+
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const masterSnap = await getDoc(masterRef);
+    const masterRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
+    Object.keys(masterRecords).forEach(k => {
+      if (k.endsWith(`_${session}_${dateStr}`)) {
+        delete masterRecords[k];
+      }
+    });
+    await setDoc(masterRef, { records: masterRecords }, { merge: true });
   };
 
   const handleClearMonthSession = async (targetYear: number, targetMonth: number, targetSession: SessionType) => {
@@ -749,7 +755,17 @@ export default function App() {
     });
     setRecords(updated);
     saveAttendanceRecords(updated);
-    await setDoc(doc(db, 'attendance', 'master_state'), { records: updated }, { merge: true });
+
+    const masterRef = doc(db, 'attendance', 'master_state');
+    const masterSnap = await getDoc(masterRef);
+    const masterRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
+    Object.keys(masterRecords).forEach(k => {
+      const parts = k.split('_');
+      if (parts.length >= 3 && parts[1] === targetSession && parts[2].startsWith(monthPrefix)) {
+        delete masterRecords[k];
+      }
+    });
+    await setDoc(masterRef, { records: masterRecords }, { merge: true });
   };
 
   const handleClearAll = async () => {
