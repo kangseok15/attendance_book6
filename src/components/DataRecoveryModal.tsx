@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Student, AttendanceRecord, UserRole } from '../types/attendance';
-import { initialStudents } from '../data/initialData';
+import { getInitialStudents } from '../data/initialData';
 import { 
   loadSnapshots, 
   deleteSnapshot, 
@@ -338,8 +338,9 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
     setIsProcessing(true);
     try {
       saveSnapshot('초기 학생 명단 리셋 전 자동 백업', records, students);
-      onRestoreData(initialStudents, records);
-      await saveFullRestoreToFirestore(records, initialStudents);
+      const defaultStudents = getInitialStudents();
+      onRestoreData(defaultStudents, records);
+      await saveFullRestoreToFirestore(records, defaultStudents);
       setSnapshots(loadSnapshots());
       showFeedback('success', '학생 명단이 초기 기본값(45명)으로 안전하게 리셋되었습니다.');
     } catch (e: any) {
@@ -470,7 +471,7 @@ export const DataRecoveryModal: React.FC<DataRecoveryModalProps> = ({
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   </div>
                   <p className="text-xs text-indigo-800 dark:text-indigo-300 mt-1 leading-relaxed">
-                    매일 <strong className="font-extrabold text-indigo-950 dark:text-white">아침 08:20</strong> (아침 자습 마감 시점)과 <strong className="font-extrabold text-indigo-950 dark:text-white">오후 18:00</strong> (야간 자습 1타임 시작 전 시점)에 서버가 전체 출결 데이터와 학생 명단을 안전한 파일로 자동 저장합니다.
+                    매일 <strong className="font-extrabold text-indigo-950 dark:text-white">아침 08:20</strong> (아침 자습 마감 시점)과 <strong className="font-extrabold text-indigo-950 dark:text-white">오후 18:00</strong> (야간 자습 1타임 시작 전 시점)에 서버가 전체 출결 데이터와 학생 명단을 안전한 파일로 자동 저장합니다[cite: 1].
                   </p>
                 </div>
               </div>
