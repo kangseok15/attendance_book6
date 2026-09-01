@@ -56,8 +56,8 @@ import {
   getAutoSessionByCurrentTime 
 } from './utils/attendanceHelpers';
 
-import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
-import { db, saveRecordToFirestore, saveBatchToFirestore, saveStudentsToFirestore } from './utils/firebase';
+import { doc, onSnapshot, getDoc, setDoc } from 'firebase/firestore';
+import { db, saveRecordToFirestore, saveBatchToFirestore, saveStudentsToFirestore, syncMasterRecordsToFirestore } from './utils/firebase';
 
 export default function App() {
   const getInitialRole = (): UserRole => {
@@ -186,29 +186,29 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
+  // Firestore 초기 세팅
   useEffect(() => {
-    const initMasterStateIfEmpty = async () => {
+    const initMaster = async () => {
       try {
         const masterRef = doc(db, 'attendance', 'master_state');
-        const docSnap = await getDoc(masterRef);
-        if (!docSnap.exists() || !docSnap.data()?.students) {
-          const currentStudents = loadStudents();
-          const currentRecords = loadAttendanceRecords();
+        const snap = await getDoc(masterRef);
+        if (!snap.exists() || !snap.data()?.students) {
+          const initSt = loadStudents();
+          const initRec = loadAttendanceRecords();
           await setDoc(masterRef, {
-            students: currentStudents,
-            records: currentRecords
-          }, { merge: true });
-
-          await setDoc(doc(db, 'attendance', 'students'), { list: currentStudents });
+            students: initSt,
+            records: initRec,
+            updatedAt: Date.now()
+          });
         }
       } catch (e) {
-        console.warn('Firestore master init check:', e);
+        console.warn('Firestore init check:', e);
       }
     };
-    initMasterStateIfEmpty();
+    initMaster();
   }, []);
 
-  // 🔥 Firestore 실시간 리스너 (완전 동기화)
+  // 🔥 Firestore 실시간 리스너 (모든 기기 100% 실시간 일치)
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -226,9 +226,7 @@ export default function App() {
       }
     });
 
-    return () => {
-      unsubMaster();
-    };
+    return () => unsubMaster();
   }, []);
 
   const handleRoleChange = (newRole: UserRole) => {
@@ -354,7 +352,7 @@ export default function App() {
       const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
       setLastSyncedTime(timeStr);
       setIsSyncing(false);
-      setSyncToast(`클라우드 최신 출결 데이터로 동기화 완료 (${timeStr})`);
+      setSyncToast(`클라우드 동기화 완료 (${timeStr})`);
       setTimeout(() => setSyncToast(null), 3000);
     }
   };
@@ -444,8 +442,8 @@ export default function App() {
       night: newNightDays,
     });
 
-    setSyncToast('📅 이전 학년도 학교 행사가 정리되었습니다. (출결 기록은 100% 보존됩니다.)');
-    setTimeout(() => setSyncToast(null), 3500);
+    setSyncToast('📅 학교 행사 정리 완료');
+    setTimeout(() => setSyncToast(null), 3000);
   };
 
   const handleResetAllEvents = () => {
@@ -460,8 +458,8 @@ export default function App() {
       night: newNightDays,
     });
 
-    setSyncToast('📅 학교 행사 목록이 초기화되었습니다.');
-    setTimeout(() => setSyncToast(null), 3500);
+    setSyncToast('📅 학교 행사 초기화 완료');
+    setTimeout(() => setSyncToast(null), 3000);
   };
 
   // 단일 출결 수정
@@ -488,25 +486,20 @@ export default function App() {
       finalReason = reason.trim();
     }
 
-    const updatedRecord: AttendanceRecord = {
-      status,
-      reason: finalReason,
-      checkInTime: finalCheckInTime,
-    };
-
-    setRecords(prev => {
-      const updated = {
-        ...prev,
-        [key]: updatedRecord,
+    const updated = { ...records };
+    if (status === 'NONE') {
+      delete updated[key];
+    } else {
+      updated[key] = {
+        status,
+        reason: finalReason,
+        checkInTime: finalCheckInTime,
       };
-      if (status === 'NONE') {
-        delete updated[key];
-      }
-      saveAttendanceRecords(updated);
-      return updated;
-    });
+    }
 
-    await saveRecordToFirestore(studentId, session, dateStr, status, finalReason, finalCheckInTime);
+    setRecords(updated);
+    saveAttendanceRecords(updated);
+    await syncMasterRecordsToFirestore(updated, students);
   };
 
   // 일괄 출결 처리
@@ -517,14 +510,6 @@ export default function App() {
   ) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const updates: Array<{
-      studentId: string;
-      session: SessionType;
-      dateStr: string;
-      status: AttendanceStatus;
-      reason?: string;
-      checkInTime?: string;
-    }> = [];
 
     const newRecords = { ...records };
     students
@@ -541,39 +526,20 @@ export default function App() {
             checkInTime: recCheckIn,
           };
         }
-        updates.push({
-          studentId: st.id,
-          session,
-          dateStr,
-          status,
-          reason: undefined,
-          checkInTime: recCheckIn,
-        });
       });
 
     setRecords(newRecords);
     saveAttendanceRecords(newRecords);
-
-    if (updates.length > 0) {
-      await saveBatchToFirestore(updates);
-    }
+    await syncMasterRecordsToFirestore(newRecords, students);
   };
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기)
+  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기 실시간 100% 동기화)
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const trackingKey = `${session}_${dateStr}_${gradeFilter ?? 'all'}`;
-    const updates: Array<{
-      studentId: string;
-      session: SessionType;
-      dateStr: string;
-      status: AttendanceStatus;
-      reason?: string;
-      checkInTime?: string;
-    }> = [];
 
     const updated = { ...records };
     const targetGrade = gradeFilter !== undefined ? Number(gradeFilter) : undefined;
@@ -603,15 +569,6 @@ export default function App() {
           reason: undefined,
           checkInTime: currentTimestamp,
         };
-        const stId = key.split('_')[0];
-        updates.push({
-          studentId: stId,
-          session,
-          dateStr,
-          status: 'ABSENT',
-          reason: undefined,
-          checkInTime: currentTimestamp,
-        });
       });
       setLastFilledDayKeys(map => ({
         ...map,
@@ -623,15 +580,6 @@ export default function App() {
         previousKeys.forEach(key => {
           if (updated[key]?.status === 'ABSENT') {
             delete updated[key];
-            const stId = key.split('_')[0];
-            updates.push({
-              studentId: stId,
-              session,
-              dateStr,
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            });
           }
         });
         setLastFilledDayKeys(map => {
@@ -644,14 +592,6 @@ export default function App() {
           const key = getRecordKey(st.id, session, dateStr);
           if (updated[key]?.status === 'ABSENT') {
             delete updated[key];
-            updates.push({
-              studentId: st.id,
-              session,
-              dateStr,
-              status: 'NONE',
-              reason: undefined,
-              checkInTime: undefined,
-            });
           }
         });
       }
@@ -659,10 +599,7 @@ export default function App() {
 
     setRecords(updated);
     saveAttendanceRecords(updated);
-
-    if (updates.length > 0) {
-      await saveBatchToFirestore(updates);
-    }
+    await syncMasterRecordsToFirestore(updated, students);
   };
 
   const handleToggleDay = (dateStr: string) => {
@@ -713,7 +650,7 @@ export default function App() {
     }));
   };
 
-  // 🔥 [출결 비우기] - 특정 날짜 비우기
+  // 🔥 [출결 비우기] - 특정 날짜 비우기 (실시간 즉시 반영)
   const handleClearDate = async (dateStr: string, gradeFilter?: number) => {
     saveSnapshot(`[${dateStr}] 출결 비우기 전 자동 백업`, records, students);
     const updated = { ...records };
@@ -723,28 +660,10 @@ export default function App() {
         const key = getRecordKey(st.id, session, dateStr);
         delete updated[key];
       });
+
     setRecords(updated);
     saveAttendanceRecords(updated);
-
-    try {
-      const masterRef = doc(db, 'attendance', 'master_state');
-      const masterSnap = await getDoc(masterRef);
-      const masterRecords = masterSnap.exists() ? { ...(masterSnap.data().records || {}) } : {};
-      
-      Object.keys(masterRecords).forEach(k => {
-        if (k.endsWith(`_${session}_${dateStr}`)) {
-          const stId = k.split('_')[0];
-          const st = students.find(s => s.id === stId);
-          if (gradeFilter === undefined || (st && st.grade === gradeFilter)) {
-            delete masterRecords[k];
-          }
-        }
-      });
-      // Firestore master_state 교체 저장 -> 모든 기기에 즉시 삭제 브로드캐스팅
-      await setDoc(masterRef, { records: masterRecords }, { merge: true });
-    } catch (e) {
-      console.error('handleClearDate error:', e);
-    }
+    await syncMasterRecordsToFirestore(updated, students);
   };
 
   // 🔥 [출결 비우기] - 특정 월/세션 비우기
@@ -763,23 +682,10 @@ export default function App() {
         }
       }
     });
+
     setRecords(updated);
     saveAttendanceRecords(updated);
-
-    try {
-      const masterRef = doc(db, 'attendance', 'master_state');
-      const masterSnap = await getDoc(masterRef);
-      const masterRecords = masterSnap.exists() ? { ...(masterSnap.data().records || {}) } : {};
-      Object.keys(masterRecords).forEach(k => {
-        const parts = k.split('_');
-        if (parts.length >= 3 && parts[1] === targetSession && parts[2].startsWith(monthPrefix)) {
-          delete masterRecords[k];
-        }
-      });
-      await setDoc(masterRef, { records: masterRecords }, { merge: true });
-    } catch (e) {
-      console.error('handleClearMonthSession error:', e);
-    }
+    await syncMasterRecordsToFirestore(updated, students);
   };
 
   // 🔥 [출결 비우기] - 전체 초기화
@@ -787,11 +693,7 @@ export default function App() {
     saveSnapshot('전체 출결 비우기 전 자동 백업', records, students);
     setRecords({});
     saveAttendanceRecords({});
-    try {
-      await setDoc(doc(db, 'attendance', 'master_state'), { records: {} }, { merge: true });
-    } catch (e) {
-      console.error('handleClearAll error:', e);
-    }
+    await syncMasterRecordsToFirestore({}, students);
   };
 
   const handleRestoreData = async (restoredStudents?: Student[], restoredRecords?: Record<string, AttendanceRecord>) => {
@@ -808,15 +710,7 @@ export default function App() {
     saveStudents(finalStudents);
     saveAttendanceRecords(finalRecords);
 
-    try {
-      await setDoc(doc(db, 'attendance', 'master_state'), {
-        students: finalStudents,
-        records: finalRecords
-      });
-      await setDoc(doc(db, 'attendance', 'students'), { list: finalStudents });
-    } catch (e) {
-      console.error('Firestore 복원 실패:', e);
-    }
+    await syncMasterRecordsToFirestore(finalRecords, finalStudents);
 
     const n = new Date();
     setLastSyncedTime(`${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`);
