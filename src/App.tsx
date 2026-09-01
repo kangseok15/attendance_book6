@@ -56,7 +56,6 @@ import {
   getAutoSessionByCurrentTime 
 } from './utils/attendanceHelpers';
 
-// Firebase Firestore 직접 연동
 import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 import { db, saveRecordToFirestore, saveBatchToFirestore, saveStudentsToFirestore } from './utils/firebase';
 
@@ -147,7 +146,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ViewTab>(() => getInitialTab(getInitialRole()));
   const [session, setSession] = useState<SessionType>('morning');
 
-  // 현재 실제 날짜 기준으로 연/월 자동 설정
   const [year, setYear] = useState<number>(() => new Date().getFullYear());
   const [month, setMonth] = useState<number>(() => new Date().getMonth() + 1);
 
@@ -188,7 +186,6 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
-  // Firestore 초기 생성 보장
   useEffect(() => {
     const initMasterStateIfEmpty = async () => {
       try {
@@ -221,11 +218,8 @@ export default function App() {
           saveStudents(data.students);
         }
         if (data.records && typeof data.records === 'object') {
-          setRecords(prev => {
-            const merged = { ...prev, ...data.records };
-            saveAttendanceRecords(merged);
-            return merged;
-          });
+          setRecords(data.records);
+          saveAttendanceRecords(data.records);
         }
         const now = new Date();
         setLastSyncedTime(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`);
@@ -512,7 +506,7 @@ export default function App() {
     await saveRecordToFirestore(studentId, session, dateStr, status, finalReason, finalCheckInTime);
   };
 
-  // 일괄 출결 처리 (일괄 출석/일괄 비우기)
+  // 일괄 출결 처리
   const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
@@ -531,7 +525,7 @@ export default function App() {
 
     const newRecords = { ...records };
     students
-      .filter(st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter))
+      .filter(st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === Number(gradeFilter)))
       .forEach(st => {
         const key = getRecordKey(st.id, session, dateStr);
         const recCheckIn = status !== 'NONE' ? (records[key]?.checkInTime || currentTimestamp) : undefined;
@@ -560,7 +554,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 전체 X(결석 채우기) & 되돌리기 완벽 클라우드 동기화
+  // 🔥 전체 X (미체크 결석 채우기 / 되돌리기) 완벽 처리
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -575,8 +569,9 @@ export default function App() {
     }> = [];
 
     const updated = { ...records };
+    const targetGrade = gradeFilter !== undefined ? Number(gradeFilter) : undefined;
     const applicableStudents = students.filter(
-      st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter)
+      st => st.active && !isStudentExcluded(st, session, dateStr) && (targetGrade === undefined || st.grade === targetGrade)
     );
 
     const emptyKeys: string[] = [];
@@ -589,7 +584,7 @@ export default function App() {
     });
 
     if (emptyKeys.length > 0) {
-      // 1. 미체크 빈칸이 있는 경우 -> 결석(X)으로 채움
+      // 미체크 학생을 결석(ABSENT)으로 설정
       emptyKeys.forEach(key => {
         updated[key] = {
           status: 'ABSENT',
@@ -611,7 +606,7 @@ export default function App() {
         [trackingKey]: emptyKeys,
       }));
     } else {
-      // 2. 이미 결석으로 채워진 상태에서 다시 누른 경우 -> 되돌리기 (빈칸 복원)
+      // 이미 결석 처리된 학생들을 빈칸(NONE)으로 원복
       const previousKeys = lastFilledDayKeys[trackingKey];
       if (previousKeys && previousKeys.length > 0) {
         previousKeys.forEach(key => {
@@ -662,7 +657,6 @@ export default function App() {
     setRecords(updated);
     saveAttendanceRecords(updated);
 
-    // 🔥 변경된 모든 학생의 출결(결석 또는 되돌린 빈칸)을 Firestore 클라우드로 일괄 전송
     if (updates.length > 0) {
       await saveBatchToFirestore(updates);
     }
