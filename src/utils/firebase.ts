@@ -8,6 +8,7 @@ import {
   doc, 
   getDoc,
   setDoc, 
+  deleteField,
   onSnapshot, 
   enableIndexedDbPersistence 
 } from 'firebase/firestore';
@@ -23,11 +24,9 @@ const firebaseConfig = {
   appId: "1:576981296217:web:dfcbab31e008e527be7d48"
 };
 
-// Initialize Firebase App & Firestore
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app);
 
-// Enable Offline Persistence safely
 if (typeof window !== 'undefined') {
   try {
     enableIndexedDbPersistence(db).catch((err) => {
@@ -43,7 +42,7 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * 단일 출결 저장 (전체 records 보존 및 실시간 master_state 동기화)
+ * 단일 출결 저장
  */
 export async function saveRecordToFirestore(
   studentId: string,
@@ -58,19 +57,23 @@ export async function saveRecordToFirestore(
     const dateParts = dateStr.split('-');
     const monthKey = `records_${dateParts[0]}_${dateParts[1]}`;
 
-    const recordData: Record<string, any> = { status };
-    if (reason !== undefined) recordData.reason = reason;
-    if (checkInTime !== undefined) recordData.checkInTime = checkInTime;
-
-    // 월별 보관용 문서
-    await setDoc(doc(db, 'attendance', monthKey), { [key]: recordData }, { merge: true });
-
-    // 실시간 master_state 문서 갱신
     const masterRef = doc(db, 'attendance', 'master_state');
     const masterSnap = await getDoc(masterRef);
     const existingRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
-    existingRecords[key] = recordData;
 
+    if (status === 'NONE') {
+      delete existingRecords[key];
+      await setDoc(doc(db, 'attendance', monthKey), { [key]: deleteField() }, { merge: true });
+    } else {
+      const recordData: Record<string, any> = { status };
+      if (reason !== undefined) recordData.reason = reason;
+      if (checkInTime !== undefined) recordData.checkInTime = checkInTime;
+
+      existingRecords[key] = recordData;
+      await setDoc(doc(db, 'attendance', monthKey), { [key]: recordData }, { merge: true });
+    }
+
+    // master_state 전체 records 덮어쓰기 (merge: false를 사용하여 삭제 즉시 전파)
     await setDoc(masterRef, { records: existingRecords }, { merge: true });
     return true;
   } catch (e) {
@@ -94,29 +97,39 @@ export async function saveBatchToFirestore(
 ) {
   try {
     if (!updates || updates.length === 0) return true;
-    const batchData: Record<string, any> = {};
 
-    updates.forEach(u => {
-      const key = `${u.studentId}_${u.session}_${u.dateStr}`;
-      const rec: Record<string, any> = { status: u.status };
-      if (u.reason !== undefined) rec.reason = u.reason;
-      if (u.checkInTime !== undefined) rec.checkInTime = u.checkInTime;
-      batchData[key] = rec;
-    });
-
-    const sampleDate = updates[0].dateStr.split('-');
-    const monthKey = `records_${sampleDate[0]}_${sampleDate[1]}`;
-
-    // 월별 보관용 문서
-    await setDoc(doc(db, 'attendance', monthKey), batchData, { merge: true });
-
-    // master_state 전체 records에 병합하여 즉시 브로드캐스팅
     const masterRef = doc(db, 'attendance', 'master_state');
     const masterSnap = await getDoc(masterRef);
     const existingRecords = masterSnap.exists() ? (masterSnap.data().records || {}) : {};
-    
-    Object.assign(existingRecords, batchData);
 
+    const monthUpdates: Record<string, Record<string, any>> = {};
+
+    updates.forEach(u => {
+      const key = `${u.studentId}_${u.session}_${u.dateStr}`;
+      const dateParts = u.dateStr.split('-');
+      const monthKey = `records_${dateParts[0]}_${dateParts[1]}`;
+
+      if (!monthUpdates[monthKey]) monthUpdates[monthKey] = {};
+
+      if (u.status === 'NONE') {
+        delete existingRecords[key];
+        monthUpdates[monthKey][key] = deleteField();
+      } else {
+        const rec: Record<string, any> = { status: u.status };
+        if (u.reason !== undefined) rec.reason = u.reason;
+        if (u.checkInTime !== undefined) rec.checkInTime = u.checkInTime;
+
+        existingRecords[key] = rec;
+        monthUpdates[monthKey][key] = rec;
+      }
+    });
+
+    // 월별 문서 반영
+    for (const [mKey, data] of Object.entries(monthUpdates)) {
+      await setDoc(doc(db, 'attendance', mKey), data, { merge: true });
+    }
+
+    // master_state 전체 교체 저장
     await setDoc(masterRef, { records: existingRecords }, { merge: true });
     return true;
   } catch (e) {
@@ -143,7 +156,7 @@ export async function saveStudentsToFirestore(students: Student[]) {
 }
 
 /**
- * Firestore 전체 출결 상태 1회 가져오기 (apiSync.ts에서 참조)
+ * Firestore 전체 출결 상태 1회 가져오기
  */
 export async function fetchFirestoreAttendanceState() {
   try {
@@ -190,7 +203,7 @@ export function subscribeToFirestoreAttendanceState(
 }
 
 /**
- * 데이터 전체 복원 (Full Restore)
+ * 데이터 전체 복원
  */
 export async function saveFullRestoreToFirestore(
   records: Record<string, AttendanceRecord>,
