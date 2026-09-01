@@ -211,7 +211,7 @@ export default function App() {
     initMasterStateIfEmpty();
   }, []);
 
-  // 🔥 Firestore 실시간 리스너 (다른 기기 및 키오스크에서 변경된 내용 수신)
+  // Firestore 실시간 리스너
   useEffect(() => {
     const unsubMaster = onSnapshot(doc(db, 'attendance', 'master_state'), (docSnap) => {
       if (docSnap.exists()) {
@@ -265,7 +265,6 @@ export default function App() {
     setIsRoleModalOpen(true);
   };
 
-  // 🔥 관리자가 학생 명단이나 학원 요일을 바꿀 때 Firestore로 즉시 전송
   const handleUpdateStudents = async (newStudents: Student[]) => {
     const sorted = sortStudents(newStudents, [3, 2, 1], true);
     setStudents(sorted);
@@ -471,7 +470,7 @@ export default function App() {
     setTimeout(() => setSyncToast(null), 3500);
   };
 
-  // 🔥 관리자가 출석부 셀을 클릭/수정할 때 Firestore 클라우드로 즉시 전송하는 핵심 함수
+  // 단일 출결 수정
   const handleUpdateRecord = async (
     studentId: string,
     dateStr: string,
@@ -510,11 +509,10 @@ export default function App() {
       return updated;
     });
 
-    // Firestore에 직접 저장 -> 다른 태블릿, PC로 즉시 브로드캐스팅
     await saveRecordToFirestore(studentId, session, dateStr, status, finalReason, finalCheckInTime);
   };
 
-  // 🔥 관리자가 일괄 출결 처리할 때 Firestore 클라우드로 즉각 전송
+  // 일괄 출결 처리 (일괄 출석/일괄 비우기)
   const handleBatchUpdateDay = async (
     dateStr: string,
     status: AttendanceStatus,
@@ -531,30 +529,29 @@ export default function App() {
       checkInTime?: string;
     }> = [];
 
-    setRecords(prev => {
-      const updated = { ...prev };
-      students
-        .filter(st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter))
-        .forEach(st => {
-          const key = getRecordKey(st.id, session, dateStr);
-          const recCheckIn = status !== 'NONE' ? (prev[key]?.checkInTime || currentTimestamp) : undefined;
-          updated[key] = {
-            status,
-            reason: undefined,
-            checkInTime: recCheckIn,
-          };
-          updates.push({
-            studentId: st.id,
-            session,
-            dateStr,
-            status,
-            reason: undefined,
-            checkInTime: recCheckIn,
-          });
+    const newRecords = { ...records };
+    students
+      .filter(st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter))
+      .forEach(st => {
+        const key = getRecordKey(st.id, session, dateStr);
+        const recCheckIn = status !== 'NONE' ? (records[key]?.checkInTime || currentTimestamp) : undefined;
+        newRecords[key] = {
+          status,
+          reason: undefined,
+          checkInTime: recCheckIn,
+        };
+        updates.push({
+          studentId: st.id,
+          session,
+          dateStr,
+          status,
+          reason: undefined,
+          checkInTime: recCheckIn,
         });
-      saveAttendanceRecords(updated);
-      return updated;
-    });
+      });
+
+    setRecords(newRecords);
+    saveAttendanceRecords(newRecords);
 
     if (updates.length > 0) {
       await saveBatchToFirestore(updates);
@@ -563,7 +560,7 @@ export default function App() {
 
   const [lastFilledDayKeys, setLastFilledDayKeys] = useState<Record<string, string[]>>({});
 
-  // 🔥 관리자가 미체크 결석 채우기 할 때 Firestore 클라우드로 즉각 전송
+  // 🔥 전체 X(결석 채우기) & 되돌리기 완벽 클라우드 동기화
   const handleFillDayAbsent = async (dateStr: string, gradeFilter?: number) => {
     const now = new Date();
     const currentTimestamp = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -577,94 +574,95 @@ export default function App() {
       checkInTime?: string;
     }> = [];
 
-    setRecords(prev => {
-      const updated = { ...prev };
-      const applicableStudents = students.filter(
-        st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter)
-      );
+    const updated = { ...records };
+    const applicableStudents = students.filter(
+      st => st.active && !isStudentExcluded(st, session, dateStr) && (gradeFilter === undefined || st.grade === gradeFilter)
+    );
 
-      const emptyKeys: string[] = [];
-      applicableStudents.forEach(st => {
-        const key = getRecordKey(st.id, session, dateStr);
-        const status = prev[key]?.status;
-        if (!status || status === 'NONE') {
-          emptyKeys.push(key);
-        }
-      });
-
-      if (emptyKeys.length > 0) {
-        emptyKeys.forEach(key => {
-          updated[key] = {
-            status: 'ABSENT',
-            reason: undefined,
-            checkInTime: currentTimestamp,
-          };
-          const stId = key.split('_')[0];
-          updates.push({
-            studentId: stId,
-            session,
-            dateStr,
-            status: 'ABSENT',
-            reason: undefined,
-            checkInTime: currentTimestamp,
-          });
-        });
-        setLastFilledDayKeys(map => ({
-          ...map,
-          [trackingKey]: emptyKeys,
-        }));
-      } else {
-        const previousKeys = lastFilledDayKeys[trackingKey];
-        if (previousKeys && previousKeys.length > 0) {
-          previousKeys.forEach(key => {
-            if (updated[key]?.status === 'ABSENT') {
-              updated[key] = {
-                status: 'NONE',
-                reason: undefined,
-                checkInTime: undefined,
-              };
-              const stId = key.split('_')[0];
-              updates.push({
-                studentId: stId,
-                session,
-                dateStr,
-                status: 'NONE',
-                reason: undefined,
-                checkInTime: undefined,
-              });
-            }
-          });
-          setLastFilledDayKeys(map => {
-            const next = { ...map };
-            delete next[trackingKey];
-            return next;
-          });
-        } else {
-          applicableStudents.forEach(st => {
-            const key = getRecordKey(st.id, session, dateStr);
-            if (updated[key]?.status === 'ABSENT') {
-              updated[key] = {
-                status: 'NONE',
-                reason: undefined,
-                checkInTime: undefined,
-              };
-              updates.push({
-                studentId: st.id,
-                session,
-                dateStr,
-                status: 'NONE',
-                reason: undefined,
-                checkInTime: undefined,
-              });
-            }
-          });
-        }
+    const emptyKeys: string[] = [];
+    applicableStudents.forEach(st => {
+      const key = getRecordKey(st.id, session, dateStr);
+      const status = updated[key]?.status;
+      if (!status || status === 'NONE') {
+        emptyKeys.push(key);
       }
-
-      saveAttendanceRecords(updated);
-      return updated;
     });
 
+    if (emptyKeys.length > 0) {
+      // 1. 미체크 빈칸이 있는 경우 -> 결석(X)으로 채움
+      emptyKeys.forEach(key => {
+        updated[key] = {
+          status: 'ABSENT',
+          reason: undefined,
+          checkInTime: currentTimestamp,
+        };
+        const stId = key.split('_')[0];
+        updates.push({
+          studentId: stId,
+          session,
+          dateStr,
+          status: 'ABSENT',
+          reason: undefined,
+          checkInTime: currentTimestamp,
+        });
+      });
+      setLastFilledDayKeys(map => ({
+        ...map,
+        [trackingKey]: emptyKeys,
+      }));
+    } else {
+      // 2. 이미 결석으로 채워진 상태에서 다시 누른 경우 -> 되돌리기 (빈칸 복원)
+      const previousKeys = lastFilledDayKeys[trackingKey];
+      if (previousKeys && previousKeys.length > 0) {
+        previousKeys.forEach(key => {
+          if (updated[key]?.status === 'ABSENT') {
+            updated[key] = {
+              status: 'NONE',
+              reason: undefined,
+              checkInTime: undefined,
+            };
+            const stId = key.split('_')[0];
+            updates.push({
+              studentId: stId,
+              session,
+              dateStr,
+              status: 'NONE',
+              reason: undefined,
+              checkInTime: undefined,
+            });
+          }
+        });
+        setLastFilledDayKeys(map => {
+          const next = { ...map };
+          delete next[trackingKey];
+          return next;
+        });
+      } else {
+        applicableStudents.forEach(st => {
+          const key = getRecordKey(st.id, session, dateStr);
+          if (updated[key]?.status === 'ABSENT') {
+            updated[key] = {
+              status: 'NONE',
+              reason: undefined,
+              checkInTime: undefined,
+            };
+            updates.push({
+              studentId: st.id,
+              session,
+              dateStr,
+              status: 'NONE',
+              reason: undefined,
+              checkInTime: undefined,
+            });
+          }
+        });
+      }
+    }
+
+    setRecords(updated);
+    saveAttendanceRecords(updated);
+
+    // 🔥 변경된 모든 학생의 출결(결석 또는 되돌린 빈칸)을 Firestore 클라우드로 일괄 전송
     if (updates.length > 0) {
       await saveBatchToFirestore(updates);
     }
