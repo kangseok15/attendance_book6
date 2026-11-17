@@ -31,7 +31,9 @@ import {
   loadGrade3Exclusion,
   saveGrade3Exclusion,
   getAcademicYear,
-  saveSnapshot
+  saveSnapshot,
+  loadDayOverrides,
+  saveDayOverrides
 } from './utils/storage';
 import { Header, ViewTab } from './components/Header';
 import { MonthlyGridView } from './components/MonthlyGridView';
@@ -53,11 +55,32 @@ import {
   isStudentExcluded, 
   sortStudents, 
   getTodayOrClosestActiveDate, 
+  getTodayDateStr,
   getAutoSessionByCurrentTime 
 } from './utils/attendanceHelpers';
 
 import { doc, onSnapshot, getDoc, setDoc } from 'firebase/firestore';
-import { db, syncMasterRecordsToFirestore, saveStudentsToFirestore } from './utils/firebase';
+import { db, syncMasterRecordsToFirestore, saveStudentsToFirestore, saveAppConfigToFirestore, APP_CONFIG_DOC, SharedAppConfig } from './utils/firebase';
+
+/**
+ * 해당 월·세션의 기본 날짜(행사/요일 규칙) 생성 후, 관리자가 직접 켜고 끈 날짜를 덮어씀
+ */
+function buildSessionDays(
+  year: number,
+  month: number,
+  session: SessionType,
+  events: SchoolEvent[],
+  includeWed: boolean,
+  overrides: Record<string, boolean>
+): DayConfig[] {
+  const specific = (month === 8 && year === 2026)
+    ? (session === 'morning' ? [19, 20, 21, 24, 25, 26, 27, 28, 31] : [20, 21, 24, 25, 27, 28, 31])
+    : undefined;
+  return generateMonthDays(year, month, session, specific, events, includeWed).map(d => {
+    const key = `${session}_${d.dateStr}`;
+    return key in overrides ? { ...d, enabled: overrides[key] } : d;
+  });
+}
 
 export default function App() {
   const getInitialRole = (): UserRole => {
@@ -184,6 +207,59 @@ export default function App() {
   const [schoolEvents, setSchoolEvents] = useState<SchoolEvent[]>(() => loadSchoolEvents());
   const [includeWednesdaysInNight, setIncludeWednesdaysInNight] = useState<boolean>(() => loadIncludeWednesdaysInNight());
   const [grade3Exclusion, setGrade3Exclusion] = useState<Grade3ExclusionConfig>(() => loadGrade3Exclusion());
+  const [dayOverrides, setDayOverrides] = useState<Record<string, boolean>>(() => loadDayOverrides());
+
+  // 공용 설정 최신값 ref (클라우드 저장 시 사용)
+  const sharedConfigRef = useRef<SharedAppConfig>({
+    schoolEvents, includeWednesdaysInNight, grade3Exclusion, dayOverrides,
+  });
+  sharedConfigRef.current = { schoolEvents, includeWednesdaysInNight, grade3Exclusion, dayOverrides };
+
+  // 공용 설정 변경 → 이 컴퓨터(localStorage) + 클라우드에 함께 저장 → 모든 컴퓨터에 반영
+  const updateSharedConfig = (patch: Partial<SharedAppConfig>) => {
+    const next: SharedAppConfig = { ...sharedConfigRef.current, ...patch };
+    sharedConfigRef.current = next;
+    if (patch.schoolEvents) { setSchoolEvents(patch.schoolEvents); saveSchoolEvents(patch.schoolEvents); }
+    if (patch.includeWednesdaysInNight !== undefined) {
+      setIncludeWednesdaysInNight(patch.includeWednesdaysInNight);
+      saveIncludeWednesdaysInNight(patch.includeWednesdaysInNight);
+    }
+    if (patch.grade3Exclusion) { setGrade3Exclusion(patch.grade3Exclusion); saveGrade3Exclusion(patch.grade3Exclusion); }
+    if (patch.dayOverrides) { setDayOverrides(patch.dayOverrides); saveDayOverrides(patch.dayOverrides); }
+    saveAppConfigToFirestore(next);
+  };
+
+  // 🔥 공용 설정 실시간 리스너 (관리자가 바꾼 행사·날짜 설정을 모든 컴퓨터가 즉시 반영)
+  useEffect(() => {
+    const configRef = doc(db, APP_CONFIG_DOC[0], APP_CONFIG_DOC[1]);
+    const unsub = onSnapshot(configRef, (snap) => {
+      if (!snap.exists()) {
+        // 클라우드에 아직 설정이 없으면, 관리자 컴퓨터의 현재 설정을 처음 한 번 올림
+        if (loadUserRole() === 'admin') {
+          saveAppConfigToFirestore(sharedConfigRef.current);
+        }
+        return;
+      }
+      const data = snap.data();
+      if (Array.isArray(data.schoolEvents)) {
+        setSchoolEvents(data.schoolEvents);
+        saveSchoolEvents(data.schoolEvents);
+      }
+      if (typeof data.includeWednesdaysInNight === 'boolean') {
+        setIncludeWednesdaysInNight(data.includeWednesdaysInNight);
+        saveIncludeWednesdaysInNight(data.includeWednesdaysInNight);
+      }
+      if (data.grade3Exclusion && typeof data.grade3Exclusion === 'object') {
+        setGrade3Exclusion(data.grade3Exclusion);
+        saveGrade3Exclusion(data.grade3Exclusion);
+      }
+      if (data.dayOverrides && typeof data.dayOverrides === 'object') {
+        setDayOverrides(data.dayOverrides);
+        saveDayOverrides(data.dayOverrides);
+      }
+    }, (err) => console.warn('[Firebase] app_config subscribe error:', err));
+    return () => unsub();
+  }, []);
 
   const [lastSyncedTime, setLastSyncedTime] = useState<string>(() => {
     const n = new Date();
@@ -251,27 +327,14 @@ export default function App() {
   };
 
   const handleUpdateGrade3Exclusion = (newConfig: Grade3ExclusionConfig) => {
-    setGrade3Exclusion(newConfig);
-    saveGrade3Exclusion(newConfig);
+    updateSharedConfig({ grade3Exclusion: newConfig });
   };
 
-  const [daysConfig, setDaysConfig] = useState<{
-    morning: DayConfig[];
-    night: DayConfig[];
-  }>(() => {
-    const initEvents = loadSchoolEvents();
-    const initWed = loadIncludeWednesdaysInNight();
-    const initYear = new Date().getFullYear();
-    const initMonth = new Date().getMonth() + 1;
-
-    const morningDefault = (initMonth === 8 && initYear === 2026) ? [19, 20, 21, 24, 25, 26, 27, 28, 31] : undefined;
-    const nightDefault = (initMonth === 8 && initYear === 2026) ? [20, 21, 24, 25, 27, 28, 31] : undefined;
-
-    return {
-      morning: generateMonthDays(initYear, initMonth, 'morning', morningDefault, initEvents, initWed),
-      night: generateMonthDays(initYear, initMonth, 'night', nightDefault, initEvents, initWed),
-    };
-  });
+  // 날짜 설정은 (행사 + 요일 규칙 + 관리자 직접 설정)에서 자동 계산 → 모든 컴퓨터가 같은 결과
+  const daysConfig = useMemo(() => ({
+    morning: buildSessionDays(year, month, 'morning', schoolEvents, includeWednesdaysInNight, dayOverrides),
+    night: buildSessionDays(year, month, 'night', schoolEvents, includeWednesdaysInNight, dayOverrides),
+  }), [year, month, schoolEvents, includeWednesdaysInNight, dayOverrides]);
 
   const allDaysInMonth = daysConfig[session] || [];
   const activeDays = useMemo(() => {
@@ -293,6 +356,17 @@ export default function App() {
       }
     }
   }, [session, activeDays, year, month, selectedDateStr]);
+
+  // 관리자가 다른 컴퓨터에서 '오늘' 자습을 새로 열면, 이 컴퓨터도 바로 오늘 날짜로 이동
+  const todayActiveRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const todayStr = getTodayDateStr();
+    const isTodayActive = activeDays.some(d => d.dateStr === todayStr);
+    if (todayActiveRef.current === false && isTodayActive) {
+      setSelectedDateStr(todayStr);
+    }
+    todayActiveRef.current = isTodayActive;
+  }, [activeDays]);
 
   const handleTabChange = (tab: ViewTab) => {
     setActiveTab(tab);
@@ -347,23 +421,22 @@ export default function App() {
     setYear(newYear);
     setMonth(newMonth);
 
-    const newMorningDays = (newMonth === 8 && newYear === 2026)
-      ? generateMonthDays(newYear, newMonth, 'morning', [19, 20, 21, 24, 25, 26, 27, 28, 31], schoolEvents, includeWednesdaysInNight)
-      : generateMonthDays(newYear, newMonth, 'morning', undefined, schoolEvents, includeWednesdaysInNight);
-
-    const newNightDays = (newMonth === 8 && newYear === 2026)
-      ? generateMonthDays(newYear, newMonth, 'night', [20, 21, 24, 25, 27, 28, 31], schoolEvents, includeWednesdaysInNight)
-      : generateMonthDays(newYear, newMonth, 'night', undefined, schoolEvents, includeWednesdaysInNight);
-
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
-    });
-
-    const activeForCurrent = (session === 'morning' ? newMorningDays : newNightDays).filter(d => d.enabled);
+    const activeForCurrent = buildSessionDays(
+      newYear, newMonth, session, schoolEvents, includeWednesdaysInNight, dayOverrides
+    ).filter(d => d.enabled);
     if (activeForCurrent.length > 0) {
       setSelectedDateStr(getTodayOrClosestActiveDate(activeForCurrent, newYear, newMonth));
     }
+  };
+
+  // 행사를 새로 넣거나 지운 날짜는, 이전에 직접 켜고 끈 설정을 지워서 행사 설정이 그대로 적용되게 함
+  const withoutOverridesFor = (dateStrs: string[]) => {
+    const next = { ...dayOverrides };
+    dateStrs.forEach(ds => {
+      delete next[`morning_${ds}`];
+      delete next[`night_${ds}`];
+    });
+    return next;
   };
 
   const handleAddSchoolEvent = (eventData: Omit<SchoolEvent, 'id'>) => {
@@ -371,41 +444,22 @@ export default function App() {
       ...eventData,
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     };
-    const updated = [...schoolEvents, newEvent];
-    setSchoolEvents(updated);
-    saveSchoolEvents(updated);
-
-    const newMorningDays = generateMonthDays(year, month, 'morning', undefined, updated, includeWednesdaysInNight);
-    const newNightDays = generateMonthDays(year, month, 'night', undefined, updated, includeWednesdaysInNight);
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
+    updateSharedConfig({
+      schoolEvents: [...schoolEvents, newEvent],
+      dayOverrides: withoutOverridesFor([newEvent.dateStr]),
     });
   };
 
   const handleDeleteSchoolEvent = (id: string) => {
-    const updated = schoolEvents.filter(e => e.id !== id);
-    setSchoolEvents(updated);
-    saveSchoolEvents(updated);
-
-    const newMorningDays = generateMonthDays(year, month, 'morning', undefined, updated, includeWednesdaysInNight);
-    const newNightDays = generateMonthDays(year, month, 'night', undefined, updated, includeWednesdaysInNight);
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
+    const target = schoolEvents.find(e => e.id === id);
+    updateSharedConfig({
+      schoolEvents: schoolEvents.filter(e => e.id !== id),
+      dayOverrides: target ? withoutOverridesFor([target.dateStr]) : dayOverrides,
     });
   };
 
   const handleToggleWednesdayNight = (include: boolean) => {
-    setIncludeWednesdaysInNight(include);
-    saveIncludeWednesdaysInNight(include);
-
-    const newMorningDays = generateMonthDays(year, month, 'morning', undefined, schoolEvents, include);
-    const newNightDays = generateMonthDays(year, month, 'night', undefined, schoolEvents, include);
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
-    });
+    updateSharedConfig({ includeWednesdaysInNight: include });
   };
 
   const handleResetPastYearEvents = () => {
@@ -418,31 +472,14 @@ export default function App() {
       return eventAcademicYear >= currentAcademicYear;
     });
 
-    setSchoolEvents(updated);
-    saveSchoolEvents(updated);
-
-    const newMorningDays = generateMonthDays(year, month, 'morning', undefined, updated, includeWednesdaysInNight);
-    const newNightDays = generateMonthDays(year, month, 'night', undefined, updated, includeWednesdaysInNight);
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
-    });
+    updateSharedConfig({ schoolEvents: updated });
 
     setSyncToast('📅 학교 행사 정리 완료');
     setTimeout(() => setSyncToast(null), 3000);
   };
 
   const handleResetAllEvents = () => {
-    const updated: SchoolEvent[] = [];
-    setSchoolEvents(updated);
-    saveSchoolEvents(updated);
-
-    const newMorningDays = generateMonthDays(year, month, 'morning', undefined, updated, includeWednesdaysInNight);
-    const newNightDays = generateMonthDays(year, month, 'night', undefined, updated, includeWednesdaysInNight);
-    setDaysConfig({
-      morning: newMorningDays,
-      night: newNightDays,
-    });
+    updateSharedConfig({ schoolEvents: [] });
 
     setSyncToast('📅 학교 행사 초기화 완료');
     setTimeout(() => setSyncToast(null), 3000);
@@ -573,52 +610,57 @@ export default function App() {
     await syncMasterRecordsToFirestore(updated, studentsRef.current);
   };
 
+  // 날짜 직접 켜기/끄기 → 클라우드 저장 (모든 컴퓨터에 반영, 새로고침해도 유지)
   const handleToggleDay = (dateStr: string) => {
-    setDaysConfig(prev => ({
-      ...prev,
-      [session]: prev[session].map(d => (d.dateStr === dateStr ? { ...d, enabled: !d.enabled } : d)),
-    }));
+    const base = buildSessionDays(year, month, session, schoolEvents, includeWednesdaysInNight, {});
+    const baseDay = base.find(d => d.dateStr === dateStr);
+    const current = daysConfig[session].find(d => d.dateStr === dateStr);
+    if (!baseDay || !current) return;
+
+    const nextEnabled = !current.enabled;
+    const key = `${session}_${dateStr}`;
+    const next = { ...dayOverrides };
+    if (nextEnabled === baseDay.enabled) {
+      delete next[key]; // 기본값과 같아지면 직접 설정 해제
+    } else {
+      next[key] = nextEnabled;
+    }
+    updateSharedConfig({ dayOverrides: next });
   };
 
   const handleSetPreset = (preset: 'standard' | 'weekdays' | 'sample8' | 'all' | 'none') => {
-    if (preset === 'standard') {
-      const stdDays = (month === 8 && year === 2026)
-        ? (session === 'morning'
-            ? generateMonthDays(year, month, 'morning', [19, 20, 21, 24, 25, 26, 27, 28, 31], schoolEvents, includeWednesdaysInNight)
-            : generateMonthDays(year, month, 'night', [20, 21, 24, 25, 27, 28, 31], schoolEvents, includeWednesdaysInNight))
-        : generateMonthDays(year, month, session, undefined, schoolEvents, includeWednesdaysInNight);
+    const base = buildSessionDays(year, month, session, schoolEvents, includeWednesdaysInNight, {});
+    const next = { ...dayOverrides };
 
-      setDaysConfig(prev => ({
-        ...prev,
-        [session]: stdDays,
-      }));
-      return;
-    }
-
-    setDaysConfig(prev => ({
-      ...prev,
-      [session]: prev[session].map(d => {
-        let isEn = false;
-        if (preset === 'weekdays') {
-          if (session === 'night' && !includeWednesdaysInNight) {
-            isEn = d.dayOfWeek !== '토' && d.dayOfWeek !== '일' && d.dayOfWeek !== '수';
-          } else {
-            isEn = d.dayOfWeek !== '토' && d.dayOfWeek !== '일';
-          }
-        } else if (preset === 'sample8') {
-          if (session === 'night') {
-            isEn = [20, 21, 24, 25, 27, 28, 31].includes(d.dayNum);
-          } else {
-            isEn = [19, 20, 21, 24, 25, 26, 27, 28, 31].includes(d.dayNum);
-          }
-        } else if (preset === 'all') {
-          isEn = true;
-        } else if (preset === 'none') {
-          isEn = false;
+    base.forEach(d => {
+      const key = `${session}_${d.dateStr}`;
+      if (preset === 'standard') {
+        delete next[key];
+        return;
+      }
+      let isEn = false;
+      if (preset === 'weekdays') {
+        if (session === 'night' && !includeWednesdaysInNight) {
+          isEn = d.dayOfWeek !== '토' && d.dayOfWeek !== '일' && d.dayOfWeek !== '수';
+        } else {
+          isEn = d.dayOfWeek !== '토' && d.dayOfWeek !== '일';
         }
-        return { ...d, enabled: isEn };
-      }),
-    }));
+      } else if (preset === 'sample8') {
+        if (session === 'night') {
+          isEn = [20, 21, 24, 25, 27, 28, 31].includes(d.dayNum);
+        } else {
+          isEn = [19, 20, 21, 24, 25, 26, 27, 28, 31].includes(d.dayNum);
+        }
+      } else if (preset === 'all') {
+        isEn = true;
+      } else if (preset === 'none') {
+        isEn = false;
+      }
+      if (isEn === d.enabled) delete next[key];
+      else next[key] = isEn;
+    });
+
+    updateSharedConfig({ dayOverrides: next });
   };
 
   // 🔥 [출결 비우기] - 특정 날짜 비우기
