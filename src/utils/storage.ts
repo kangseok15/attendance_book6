@@ -28,7 +28,33 @@ const STORAGE_KEYS = {
   INCLUDE_WED_NIGHT: 'soongshin_mirae_include_wed_night_v1',
   GRADE3_EXCLUSION: 'soongshin_mirae_grade3_exclusion_v1',
   SNAPSHOTS: 'soongshin_mirae_snapshots_v1',
+  DAY_OVERRIDES: 'soongshin_mirae_day_overrides_v1',
 };
+
+/**
+ * 관리자가 월 설정에서 직접 켜고 끈 날짜 (행사·기본 규칙보다 우선)
+ * key: `${session}_${dateStr}` (예: 'morning_2026-11-18'), value: 자습 실시 여부
+ */
+export function loadDayOverrides(): Record<string, boolean> {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.DAY_OVERRIDES);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {
+    console.error('Failed to load day overrides:', e);
+  }
+  return {};
+}
+
+export function saveDayOverrides(overrides: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.DAY_OVERRIDES, JSON.stringify(overrides));
+  } catch (e) {
+    console.error('Failed to save day overrides:', e);
+  }
+}
 
 /**
  * 학년도 계산 (3월 ~ 익년 2월)
