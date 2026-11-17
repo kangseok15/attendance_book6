@@ -11,7 +11,7 @@ import {
   onSnapshot, 
   enableIndexedDbPersistence 
 } from 'firebase/firestore';
-import { Student, AttendanceRecord, AttendanceStatus, SessionType } from '../types/attendance';
+import { Student, AttendanceRecord, AttendanceStatus, SessionType, SchoolEvent, Grade3ExclusionConfig } from '../types/attendance';
 
 // Firebase Config
 const firebaseConfig = {
@@ -189,6 +189,33 @@ export async function saveStudentsToFirestore(students: Student[]) {
     return true;
   } catch (e) {
     console.error('[Firebase] saveStudentsToFirestore error:', e);
+    return false;
+  }
+}
+
+/**
+ * 🔥 공용 설정 (학교 행사, 날짜 켜기/끄기, 수요 야자, 고3 제외)
+ * 모든 컴퓨터가 attendance/app_config 문서를 함께 사용합니다.
+ */
+export interface SharedAppConfig {
+  schoolEvents: SchoolEvent[];
+  includeWednesdaysInNight: boolean;
+  grade3Exclusion: Grade3ExclusionConfig;
+  dayOverrides: Record<string, boolean>;
+}
+
+export const APP_CONFIG_DOC = ['attendance', 'app_config'] as const;
+
+export async function saveAppConfigToFirestore(config: SharedAppConfig) {
+  try {
+    const ref = doc(db, APP_CONFIG_DOC[0], APP_CONFIG_DOC[1]);
+    await setDoc(ref, {
+      ...JSON.parse(JSON.stringify(config)),
+      updatedAt: Date.now(),
+    });
+    return true;
+  } catch (e) {
+    console.error('[Firebase] saveAppConfigToFirestore error:', e);
     return false;
   }
 }
